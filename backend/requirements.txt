@@ -1,0 +1,11 @@
+grpcio==1.68.*
+grpcio-tools==1.68.*
+grpcio-reflection==1.68.*
+googleapis-common-protos==1.66.*
+sqlalchemy[asyncio]==2.0.*
+asyncpg==0.30.*
+python-jose[cryptography]==3.3.*
+bcrypt>=4.0
+paho-mqtt==2.1.*
+croniter==3.0.*
+google-genai>=1.0.0
