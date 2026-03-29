@@ -1,3 +1,16 @@
+# Runs on GitHub-hosted ubuntu-latest and SSHs into your server.
+#
+# Why: your self-hosted runner is registered only for pocketbridge-backend
+# (see actions-runner/.runner → gitHubUrl), so lifeOS "Deploy" jobs stay queued.
+#
+# Add repository secrets: Settings → Secrets and variables → Actions
+#   DEPLOY_HOST      — server hostname or IP (public or Tailscale DNS)
+#   DEPLOY_USER      — SSH login (e.g. zarbie)
+#   DEPLOY_SSH_KEY   — private key PEM (the whole key, with BEGIN/END lines)
+#
+# Server needs: clone at /home/zarbie/Downloads/lifeOS, git auth to pull,
+# passwordless sudo for: systemctl restart pm2-zarbie.service
+
 name: Deploy
 
 on:
@@ -6,30 +19,33 @@ on:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
-      - name: Deploy locally on runner
+      - uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
-          set -e
+          set -euo pipefail
+          test -n "${DEPLOY_HOST:-}" && test -n "${DEPLOY_USER:-}" && test -n "${DEPLOY_SSH_KEY:-}" || {
+            echo "Missing DEPLOY_HOST, DEPLOY_USER, or DEPLOY_SSH_KEY repository secrets."
+            exit 1
+          }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/lifeos_deploy
+          chmod 600 ~/.ssh/lifeos_deploy
+          ssh -i ~/.ssh/lifeos_deploy \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            'bash -s' << 'REMOTE_SCRIPT'
+          set -euo pipefail
           cd /home/zarbie/Downloads/lifeOS
           git fetch origin main
           git reset --hard origin/main
-          BUILD_VERSION=$(git rev-parse --short HEAD)
-          BUILD_COMMIT=$(git rev-parse HEAD)
-          BUILD_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          printf '{"version":"%s","commit":"%s","branch":"%s","buildTime":"%s"}\n' "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_BRANCH" "$BUILD_TIME" > backend/build-info.json
-          echo "Build version: $BUILD_VERSION ($BUILD_COMMIT) on $BUILD_BRANCH at $BUILD_TIME"
-          cd backend
-          [ -d .venv ] || python3 -m venv .venv
-          .venv/bin/pip install -q -r requirements.txt
-          chmod +x generate.sh
-          export PATH="$PWD/.venv/bin:$PATH"
-          ./generate.sh
-          set -a
-          if [ -f .env ]; then
-            . ./.env
-          fi
-          set +a
-          .venv/bin/alembic upgrade head
-          sudo systemctl restart pm2-zarbie.service
+          chmod +x scripts/deploy-lifeos-backend.sh
+          exec bash scripts/deploy-lifeos-backend.sh
+          REMOTE_SCRIPT
