@@ -743,6 +743,11 @@ class AiServiceStub(object):
                 request_serializer=lifeos__pb2.SubmitAiRequest.SerializeToString,
                 response_deserializer=lifeos__pb2.SubmitAiResponse.FromString,
                 _registered_method=True)
+        self.AgentTurn = channel.unary_unary(
+                '/lifeos.AiService/AgentTurn',
+                request_serializer=lifeos__pb2.AgentTurnRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.AgentTurnResponse.FromString,
+                _registered_method=True)
         self.History = channel.unary_unary(
                 '/lifeos.AiService/History',
                 request_serializer=lifeos__pb2.AiHistoryRequest.SerializeToString,
@@ -759,6 +764,12 @@ class AiServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Submit(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AgentTurn(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -783,6 +794,11 @@ def add_AiServiceServicer_to_server(servicer, server):
                     servicer.Submit,
                     request_deserializer=lifeos__pb2.SubmitAiRequest.FromString,
                     response_serializer=lifeos__pb2.SubmitAiResponse.SerializeToString,
+            ),
+            'AgentTurn': grpc.unary_unary_rpc_method_handler(
+                    servicer.AgentTurn,
+                    request_deserializer=lifeos__pb2.AgentTurnRequest.FromString,
+                    response_serializer=lifeos__pb2.AgentTurnResponse.SerializeToString,
             ),
             'History': grpc.unary_unary_rpc_method_handler(
                     servicer.History,
@@ -822,6 +838,33 @@ class AiService(object):
             '/lifeos.AiService/Submit',
             lifeos__pb2.SubmitAiRequest.SerializeToString,
             lifeos__pb2.SubmitAiResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AgentTurn(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.AiService/AgentTurn',
+            lifeos__pb2.AgentTurnRequest.SerializeToString,
+            lifeos__pb2.AgentTurnResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1379,6 +1422,365 @@ class SyncService(object):
             '/lifeos.SyncService/Batch',
             lifeos__pb2.SyncBatchRequest.SerializeToString,
             lifeos__pb2.SyncBatchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class CoachDataServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.UpsertCoachingCommitments = channel.unary_unary(
+                '/lifeos.CoachDataService/UpsertCoachingCommitments',
+                request_serializer=lifeos__pb2.UpsertCoachingCommitmentsRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.UpsertCoachingCommitmentsResponse.FromString,
+                _registered_method=True)
+        self.UpsertExpenses = channel.unary_unary(
+                '/lifeos.CoachDataService/UpsertExpenses',
+                request_serializer=lifeos__pb2.UpsertExpensesRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.UpsertExpensesResponse.FromString,
+                _registered_method=True)
+        self.ListCoachNotifications = channel.unary_unary(
+                '/lifeos.CoachDataService/ListCoachNotifications',
+                request_serializer=lifeos__pb2.ListCoachNotificationsRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.ListCoachNotificationsResponse.FromString,
+                _registered_method=True)
+        self.MarkCoachNotificationsRead = channel.unary_unary(
+                '/lifeos.CoachDataService/MarkCoachNotificationsRead',
+                request_serializer=lifeos__pb2.MarkCoachNotificationsReadRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.MarkCoachNotificationsReadResponse.FromString,
+                _registered_method=True)
+        self.MarkCoachNotificationsActed = channel.unary_unary(
+                '/lifeos.CoachDataService/MarkCoachNotificationsActed',
+                request_serializer=lifeos__pb2.MarkCoachNotificationsActedRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.MarkCoachNotificationsActedResponse.FromString,
+                _registered_method=True)
+        self.ListCoachingCommitments = channel.unary_unary(
+                '/lifeos.CoachDataService/ListCoachingCommitments',
+                request_serializer=lifeos__pb2.ListCoachingCommitmentsRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.ListCoachingCommitmentsResponse.FromString,
+                _registered_method=True)
+
+
+class CoachDataServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def UpsertCoachingCommitments(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpsertExpenses(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListCoachNotifications(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkCoachNotificationsRead(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkCoachNotificationsActed(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListCoachingCommitments(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_CoachDataServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'UpsertCoachingCommitments': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpsertCoachingCommitments,
+                    request_deserializer=lifeos__pb2.UpsertCoachingCommitmentsRequest.FromString,
+                    response_serializer=lifeos__pb2.UpsertCoachingCommitmentsResponse.SerializeToString,
+            ),
+            'UpsertExpenses': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpsertExpenses,
+                    request_deserializer=lifeos__pb2.UpsertExpensesRequest.FromString,
+                    response_serializer=lifeos__pb2.UpsertExpensesResponse.SerializeToString,
+            ),
+            'ListCoachNotifications': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListCoachNotifications,
+                    request_deserializer=lifeos__pb2.ListCoachNotificationsRequest.FromString,
+                    response_serializer=lifeos__pb2.ListCoachNotificationsResponse.SerializeToString,
+            ),
+            'MarkCoachNotificationsRead': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkCoachNotificationsRead,
+                    request_deserializer=lifeos__pb2.MarkCoachNotificationsReadRequest.FromString,
+                    response_serializer=lifeos__pb2.MarkCoachNotificationsReadResponse.SerializeToString,
+            ),
+            'MarkCoachNotificationsActed': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkCoachNotificationsActed,
+                    request_deserializer=lifeos__pb2.MarkCoachNotificationsActedRequest.FromString,
+                    response_serializer=lifeos__pb2.MarkCoachNotificationsActedResponse.SerializeToString,
+            ),
+            'ListCoachingCommitments': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListCoachingCommitments,
+                    request_deserializer=lifeos__pb2.ListCoachingCommitmentsRequest.FromString,
+                    response_serializer=lifeos__pb2.ListCoachingCommitmentsResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'lifeos.CoachDataService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('lifeos.CoachDataService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class CoachDataService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def UpsertCoachingCommitments(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.CoachDataService/UpsertCoachingCommitments',
+            lifeos__pb2.UpsertCoachingCommitmentsRequest.SerializeToString,
+            lifeos__pb2.UpsertCoachingCommitmentsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpsertExpenses(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.CoachDataService/UpsertExpenses',
+            lifeos__pb2.UpsertExpensesRequest.SerializeToString,
+            lifeos__pb2.UpsertExpensesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListCoachNotifications(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.CoachDataService/ListCoachNotifications',
+            lifeos__pb2.ListCoachNotificationsRequest.SerializeToString,
+            lifeos__pb2.ListCoachNotificationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkCoachNotificationsRead(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.CoachDataService/MarkCoachNotificationsRead',
+            lifeos__pb2.MarkCoachNotificationsReadRequest.SerializeToString,
+            lifeos__pb2.MarkCoachNotificationsReadResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkCoachNotificationsActed(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.CoachDataService/MarkCoachNotificationsActed',
+            lifeos__pb2.MarkCoachNotificationsActedRequest.SerializeToString,
+            lifeos__pb2.MarkCoachNotificationsActedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListCoachingCommitments(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.CoachDataService/ListCoachingCommitments',
+            lifeos__pb2.ListCoachingCommitmentsRequest.SerializeToString,
+            lifeos__pb2.ListCoachingCommitmentsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class PushNotificationServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.RegisterPushToken = channel.unary_unary(
+                '/lifeos.PushNotificationService/RegisterPushToken',
+                request_serializer=lifeos__pb2.RegisterPushTokenRequest.SerializeToString,
+                response_deserializer=lifeos__pb2.Empty.FromString,
+                _registered_method=True)
+
+
+class PushNotificationServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def RegisterPushToken(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_PushNotificationServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'RegisterPushToken': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterPushToken,
+                    request_deserializer=lifeos__pb2.RegisterPushTokenRequest.FromString,
+                    response_serializer=lifeos__pb2.Empty.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'lifeos.PushNotificationService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('lifeos.PushNotificationService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class PushNotificationService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def RegisterPushToken(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lifeos.PushNotificationService/RegisterPushToken',
+            lifeos__pb2.RegisterPushTokenRequest.SerializeToString,
+            lifeos__pb2.Empty.FromString,
             options,
             channel_credentials,
             insecure,

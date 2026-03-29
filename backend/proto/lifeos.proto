@@ -429,6 +429,123 @@ service SyncService {
   }
 }
 
+// ─── Coach data sync (optional multi-device / backup) ─
+// Stubs: implement persistence when enabling cloud sync for the mobile app.
+
+message CoachingCommitmentRecord {
+  string id = 1;
+  string suggestion = 2;
+  string reason = 3;
+  string date_suggested = 4;
+  string date_due = 5;
+  bool adopted = 6;
+  string outcome = 7;
+  string created_at = 8;
+}
+
+message UpsertCoachingCommitmentsRequest {
+  repeated CoachingCommitmentRecord commitments = 1;
+}
+
+message UpsertCoachingCommitmentsResponse {
+  int32 upserted = 1;
+}
+
+message ExpenseRecord {
+  string id = 1;
+  double amount = 2;
+  string currency = 3;
+  string category = 4;
+  string description = 5;
+  string date = 6;
+  string created_at = 7;
+}
+
+message UpsertExpensesRequest {
+  repeated ExpenseRecord expenses = 1;
+}
+
+message UpsertExpensesResponse {
+  int32 upserted = 1;
+}
+
+message CoachNotification {
+  string id = 1;
+  string domain = 2;
+  string title = 3;
+  string body = 4;
+  string priority = 5;
+  bool read = 6;
+  string rule_id = 7;
+  string created_at = 8;
+}
+
+message ListCoachNotificationsRequest {
+  bool unread_only = 1;
+  int32 limit = 2;
+}
+
+message ListCoachNotificationsResponse {
+  repeated CoachNotification notifications = 1;
+}
+
+message MarkCoachNotificationsReadRequest {
+  repeated string ids = 1;
+}
+
+message MarkCoachNotificationsReadResponse {
+  int32 updated = 1;
+}
+
+message MarkCoachNotificationsActedRequest {
+  repeated string ids = 1;
+}
+
+message MarkCoachNotificationsActedResponse {
+  int32 updated = 1;
+}
+
+message ListCoachingCommitmentsRequest {}
+
+message ListCoachingCommitmentsResponse {
+  repeated CoachingCommitmentRecord commitments = 1;
+}
+
+service CoachDataService {
+  rpc UpsertCoachingCommitments(UpsertCoachingCommitmentsRequest) returns (UpsertCoachingCommitmentsResponse) {
+    option (google.api.http) = { post: "/v1/coach/commitments" body: "*" };
+  }
+  rpc UpsertExpenses(UpsertExpensesRequest) returns (UpsertExpensesResponse) {
+    option (google.api.http) = { post: "/v1/coach/expenses" body: "*" };
+  }
+  rpc ListCoachNotifications(ListCoachNotificationsRequest) returns (ListCoachNotificationsResponse) {
+    option (google.api.http) = { get: "/v1/coach/notifications" };
+  }
+  rpc MarkCoachNotificationsRead(MarkCoachNotificationsReadRequest) returns (MarkCoachNotificationsReadResponse) {
+    option (google.api.http) = { post: "/v1/coach/notifications/read" body: "*" };
+  }
+  rpc MarkCoachNotificationsActed(MarkCoachNotificationsActedRequest) returns (MarkCoachNotificationsActedResponse) {
+    option (google.api.http) = { post: "/v1/coach/notifications/acted" body: "*" };
+  }
+  rpc ListCoachingCommitments(ListCoachingCommitmentsRequest) returns (ListCoachingCommitmentsResponse) {
+    option (google.api.http) = { get: "/v1/coach/commitments/list" };
+  }
+}
+
+// Register device token for future FCM/APNs remote nudges (Expo push or native).
+
+message RegisterPushTokenRequest {
+  string device_id = 1;
+  string token = 2;
+  string platform = 3;
+}
+
+service PushNotificationService {
+  rpc RegisterPushToken(RegisterPushTokenRequest) returns (Empty) {
+    option (google.api.http) = { post: "/v1/push/register" body: "*" };
+  }
+}
+
 // ─── Health ─────────────────────────────────────────
 
 message HealthResponse {
