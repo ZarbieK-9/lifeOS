@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 
+.env
+.env.local
+.env.*.local
+
 # Expo
 .expo/
 dist/
