@@ -17,6 +17,9 @@ yarn-error.*
 *.pem
 *.key
 
+# Written by self-hosted deploy workflow on the runner
+backend/build-info.json
+
 # Python
 __pycache__/
 *.pyc
