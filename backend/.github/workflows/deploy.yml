@@ -1,15 +1,7 @@
-# Runs on GitHub-hosted ubuntu-latest and SSHs into your server.
+# Backend-only repo: SSH to server, pull this repo, run scripts/deploy.sh
 #
-# Why: your self-hosted runner is registered only for pocketbridge-backend
-# (see actions-runner/.runner → gitHubUrl), so lifeOS "Deploy" jobs stay queued.
-#
-# Add repository secrets: Settings → Secrets and variables → Actions
-#   DEPLOY_HOST      — server hostname or IP (public or Tailscale DNS)
-#   DEPLOY_USER      — SSH login (e.g. zarbie)
-#   DEPLOY_SSH_KEY   — private key PEM (the whole key, with BEGIN/END lines)
-#
-# Server needs: clone at /home/zarbie/Downloads/lifeOS, git auth to pull,
-# passwordless sudo for: systemctl restart pm2-zarbie.service
+# Secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
+# Server: clone at e.g. /home/zarbie/lifeos-backend (set LIFEOS_BACKEND_ROOT on host or edit cd path below)
 
 name: Deploy
 
@@ -43,9 +35,9 @@ jobs:
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
             'bash -s' << 'REMOTE_SCRIPT'
           set -euo pipefail
-          cd /home/zarbie/Downloads/lifeOS
+          cd "${LIFEOS_BACKEND_ROOT:-/home/zarbie/lifeos-backend}"
           git fetch origin main
           git reset --hard origin/main
-          chmod +x backend/scripts/deploy.sh
-          exec bash backend/scripts/deploy.sh
+          chmod +x scripts/deploy.sh
+          exec bash scripts/deploy.sh
           REMOTE_SCRIPT
