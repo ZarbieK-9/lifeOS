@@ -8,6 +8,8 @@ class Settings:
         "DATABASE_URL",
         "postgresql+asyncpg://lifeos:lifeos@localhost:5432/lifeos",
     )
+    # IANA timezone for server-side coach windows when per-user TZ is not set (e.g. "America/New_York").
+    COACH_TIMEZONE: str = os.getenv("COACH_TIMEZONE", "UTC")
     JWT_SECRET: str = os.getenv("JWT_SECRET", "change-me-in-production")
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
@@ -20,10 +22,6 @@ class Settings:
     MQTT_BROKER_PORT: int = int(os.getenv("MQTT_BROKER_PORT", "1883"))
     MQTT_USERNAME: str = os.getenv("MQTT_USERNAME", "lifeos_server")
     MQTT_PASSWORD: str = os.getenv("MQTT_PASSWORD", "lifeos_server_pass")
-
-    # Gemini AI
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 
 settings = Settings()

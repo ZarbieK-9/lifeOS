@@ -3,13 +3,12 @@ import Constants from 'expo-constants';
 import * as Linking from 'expo-linking';
 import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useRef } from 'react';
-import { AppState, AppStateStatus, InteractionManager, useColorScheme } from 'react-native';
+import React, { useCallback, useEffect, useRef } from 'react';
+import { AppState, AppStateStatus, InteractionManager, Text, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import 'react-native-reanimated';
 import { MD3DarkTheme, MD3LightTheme, PaperProvider } from 'react-native-paper';
 
-import { useColorScheme as useAppColorScheme } from '@/hooks/use-color-scheme';
 import { useNetwork } from '@/src/hooks/useNetwork';
 import { useStore } from '@/src/store/useStore';
 import { useSleep } from '@/src/hooks/useSleep';
@@ -17,6 +16,13 @@ import { useFocusTimer } from '@/src/hooks/useFocusTimer';
 import { useHydrationReminder } from '@/src/hooks/useHydrationReminder';
 import { useProactiveAI } from '@/src/hooks/useProactiveAI';
 import { useNotificationListener } from '@/src/hooks/useNotificationListener';
+import { initAgentSystem, onAppForeground } from '@/src/agent/agent';
+import {
+  consumePendingHeyZarbieCommand,
+  registerHeyZarbieListeners,
+  syncHeyZarbieState,
+} from '@/src/services/heyZarbie';
+import { ThemeContextProvider, useThemeContext } from '@/src/context/ThemeContext';
 
 // expo-notifications is not supported in Expo Go (SDK 53+). Only load and use it in dev builds.
 const isExpoGo = Constants.appOwnership === 'expo';
@@ -25,11 +31,153 @@ export const unstable_settings = {
   anchor: '(tabs)',
 };
 
+async function registerPushTokenWithRetry(maxRetries = 3): Promise<void> {
+  const { api } = await import('../src/services/api');
+  if (!api.isConfigured() || !(await api.isAuthenticated())) return;
+
+  const Notifications = require('expo-notifications');
+  const ExpoConstants = require('expo-constants');
+  const Device = require('expo-device');
+  const { kv } = require('../src/db/mmkv');
+
+  const projectId = ExpoConstants.expoConfig?.extra?.eas?.projectId;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const tokenRes = await Notifications.getExpoPushTokenAsync(
+        projectId ? { projectId } : undefined,
+      );
+      const token = tokenRes?.data;
+      if (!token) throw new Error('No token returned');
+
+      const result = await api.registerPushToken({
+        token,
+        platform: Device.osName?.toLowerCase().includes('ios') ? 'ios' : 'android',
+        device_id: Device.modelId || Device.modelName || undefined,
+      });
+
+      if (result.ok) {
+        kv.set('push_token', token);
+        kv.set('push_token_registered_at', new Date().toISOString());
+        console.log('[LifeOS] Push token registered successfully');
+        return;
+      }
+      throw new Error(result.error || 'Registration failed');
+    } catch (e) {
+      console.warn(`[LifeOS] Push register attempt ${attempt + 1} failed:`, e);
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
+  }
+}
+
 function AppBoot() {
   const router = useRouter();
   const oauthHandledUrl = useRef<string | null>(null);
+  const addAiCommand = useStore((s) => s.addAiCommand);
+  const resolveAiCommand = useStore((s) => s.resolveAiCommand);
+  const heyZarbieEnabled = useStore((s) => s.heyZarbieEnabled);
+  const heyZarbieOnlyWhenCharging = useStore((s) => s.heyZarbieOnlyWhenCharging);
+  const heyZarbiePauseOnLowBattery = useStore((s) => s.heyZarbiePauseOnLowBattery);
+  const heyZarbieSensitivity = useStore((s) => s.heyZarbieSensitivity);
+  const heyZarbieLaunchBehavior = useStore((s) => s.heyZarbieLaunchBehavior);
+  const heyZarbieConsentGranted = useStore((s) => s.heyZarbieConsentGranted);
+
+  const processHeyZarbieTranscript = useCallback(
+    async (raw: string) => {
+      const command = (raw || '').trim();
+      if (!command) return;
+      const { runVoiceCommand } = await import('../src/agent/agent');
+      useStore.getState().enqueueEvent('agent_outcome', {
+        source: 'heyzarbie',
+        phase: 'transcript_received',
+        text_len: command.length,
+      }).catch(() => {});
+      const cmdId = await addAiCommand(command, 'voice');
+      try {
+        const response = await runVoiceCommand(command, { handsFree: true, cmdId });
+        await resolveAiCommand(cmdId, response.output, 'executed');
+        useStore.getState().enqueueEvent('agent_outcome', {
+          source: 'heyzarbie',
+          phase: 'command_executed',
+          cmd_id: cmdId,
+        }).catch(() => {});
+        InteractionManager.runAfterInteractions(() => {
+          try {
+            router.push('/(tabs)/ai');
+          } catch (_) {}
+        });
+      } catch {
+        await resolveAiCommand(cmdId, `Error processing command: "${command}"`, 'failed');
+        useStore.getState().enqueueEvent('agent_outcome', {
+          source: 'heyzarbie',
+          phase: 'command_failed',
+          cmd_id: cmdId,
+        }).catch(() => {});
+      }
+    },
+    [addAiCommand, resolveAiCommand, router],
+  );
+
+  useEffect(() => {
+    const drainPending = () => {
+      void (async () => {
+        const pending = await consumePendingHeyZarbieCommand();
+        if (pending) await processHeyZarbieTranscript(pending);
+      })();
+    };
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') drainPending();
+    });
+    const t = setTimeout(drainPending, 1000);
+    return () => {
+      sub.remove();
+      clearTimeout(t);
+    };
+  }, [processHeyZarbieTranscript]);
 
   // Handle notification action buttons (Copy Reply, Open App) + default tap
+  useEffect(() => {
+    const unsub = registerHeyZarbieListeners({
+      onTranscript: ({ text }) => {
+        void processHeyZarbieTranscript(text || '');
+      },
+      onWakeDetected: () => {
+        useStore.getState().enqueueEvent('agent_outcome', {
+          source: 'heyzarbie',
+          phase: 'wake_detected',
+        }).catch(() => {});
+      },
+      onWakeError: ({ reason }) => {
+        useStore.getState().enqueueEvent('agent_outcome', {
+          source: 'heyzarbie',
+          phase: 'wake_error',
+          reason: reason ?? 'unknown',
+        }).catch(() => {});
+      },
+    });
+    return () => unsub();
+  }, [processHeyZarbieTranscript]);
+
+  useEffect(() => {
+    const enabled = heyZarbieConsentGranted && heyZarbieEnabled;
+    syncHeyZarbieState({
+      enabled,
+      onlyWhenCharging: heyZarbieOnlyWhenCharging,
+      pauseOnLowBattery: heyZarbiePauseOnLowBattery,
+      sensitivity: heyZarbieSensitivity,
+      launchBehavior: heyZarbieLaunchBehavior,
+    }).catch(() => {});
+  }, [
+    heyZarbieEnabled,
+    heyZarbieOnlyWhenCharging,
+    heyZarbiePauseOnLowBattery,
+    heyZarbieSensitivity,
+    heyZarbieLaunchBehavior,
+    heyZarbieConsentGranted,
+  ]);
+
   useEffect(() => {
     if (isExpoGo) return;
     const Notifications = require('expo-notifications');
@@ -69,6 +217,24 @@ function AppBoot() {
   useProactiveAI();
   useNotificationListener();
 
+  // Initialize the agentic system (watcher, patterns, domain agents, goals, plans)
+  useEffect(() => {
+    const notifyFn = isExpoGo
+      ? undefined
+      : (title: string, body: string, _priority: 'high' | 'low') => {
+          import('../src/services/notifications').then(({ sendProactiveNotification }) => {
+            sendProactiveNotification(title, body).catch(() => {});
+          });
+        };
+    initAgentSystem(notifyFn).catch((e) => console.warn('[AppBoot] agent init error:', e));
+
+    // Evaluate watcher on app foreground
+    const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
+      if (state === 'active') onAppForeground();
+    });
+    return () => sub.remove();
+  }, []);
+
   // Handle Google OAuth deep link when backend redirects to lifeos://oauth?code=...
   // Retry getInitialURL (Android can deliver the intent after a short delay) and re-check when app comes to foreground.
   useEffect(() => {
@@ -107,7 +273,6 @@ function AppBoot() {
     const Notifications = require('expo-notifications');
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
-        shouldShowAlert: true,
         shouldPlaySound: true,
         shouldSetBadge: false,
         shouldShowBanner: true,
@@ -116,8 +281,42 @@ function AppBoot() {
     });
     const { requestNotificationPermissions } = require('../src/services/notifications');
     const { registerBackgroundFetch } = require('../src/services/backgroundTasks');
-    requestNotificationPermissions();
+    const {
+      registerScheduledCoachNotifications,
+      cancelScheduledCoachNotifications,
+    } = require('../src/services/scheduledCoachNotifications');
+    const { kv } = require('../src/db/mmkv');
+    requestNotificationPermissions().then(async (granted: boolean) => {
+      if (granted) {
+        if (kv.getString('server_coach_enabled') === '1') {
+          await cancelScheduledCoachNotifications();
+        } else {
+          await registerScheduledCoachNotifications();
+        }
+      }
+      if (granted) {
+        registerPushTokenWithRetry().catch((e) =>
+          console.warn('[LifeOS] Push token registration failed:', e),
+        );
+      }
+    });
+
+    // Foreground remote push handler
+    const foregroundSub = Notifications.addNotificationReceivedListener(
+      (notification: { request?: { content?: { data?: Record<string, unknown> } } }) => {
+        const data = notification.request?.content?.data;
+        const type = data?.type;
+        console.log('[LifeOS] Foreground push received:', type);
+        if (type === 'coach' || type === 'watcher') {
+          import('../src/store/useStore')
+            .then(({ useStore }) => useStore.getState().loadWatcherQueue())
+            .catch(() => {});
+        }
+      },
+    );
+
     registerBackgroundFetch();
+    return () => { foregroundSub.remove(); };
   }, []);
 
   return (
@@ -132,9 +331,59 @@ function AppBoot() {
   );
 }
 
+// ── Error Boundary ────────────────────────────────
+
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('[AppErrorBoundary] Uncaught error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: '#000' }}>
+          <Text style={{ color: '#ff6b6b', fontSize: 18, fontWeight: '700', marginBottom: 12 }}>Something went wrong</Text>
+          <Text style={{ color: '#aaa', fontSize: 14, textAlign: 'center', marginBottom: 24 }}>
+            {this.state.error?.message ?? 'An unexpected error occurred.'}
+          </Text>
+          <Text
+            style={{ color: '#5a8f86', fontSize: 16, fontWeight: '600' }}
+            onPress={() => this.setState({ hasError: false, error: null })}
+          >
+            Try Again
+          </Text>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function RootLayout() {
-  const colorScheme = useAppColorScheme();
-  const isDark = colorScheme === 'dark';
+  return (
+    <AppErrorBoundary>
+      <ThemeContextProvider>
+        <RootThemeShell />
+      </ThemeContextProvider>
+    </AppErrorBoundary>
+  );
+}
+
+function RootThemeShell() {
+  const { resolvedMode } = useThemeContext();
+  const isDark = resolvedMode === 'dark';
   const paperTheme = isDark ? MD3DarkTheme : MD3LightTheme;
 
   return (
@@ -142,7 +391,7 @@ export default function RootLayout() {
       <ThemeProvider value={isDark ? DarkTheme : DefaultTheme}>
         <PaperProvider theme={paperTheme}>
           <AppBoot />
-          <StatusBar style="auto" />
+          <StatusBar style={isDark ? 'light' : 'dark'} />
         </PaperProvider>
       </ThemeProvider>
     </SafeAreaProvider>

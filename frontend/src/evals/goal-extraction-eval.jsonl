@@ -1,0 +1,4 @@
+{"input":"I want to drink 3L water daily","expected_domain":"health","expected_tool":"set_hydration_reminder"}
+{"input":"Help me save $500 this month","expected_domain":"finance","expected_tool":"set_budget"}
+{"input":"I want to sleep 8 hours every night","expected_domain":"health","expected_tool":"schedule_reminder"}
+{"input":"I want to complete 5 tasks this week","expected_domain":"productivity","expected_tool":null}

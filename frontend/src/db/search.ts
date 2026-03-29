@@ -31,7 +31,7 @@ export async function createSearchIndex(): Promise<void> {
 
 /** Index a single item. Safe to call on insert or update (deletes old entry first). */
 export async function indexItem(
-  contentType: 'task' | 'note' | 'memory' | 'expense' | 'habit',
+  contentType: 'task' | 'note' | 'memory' | 'expense' | 'habit' | 'goal',
   contentId: string,
   title: string,
   body: string,
@@ -193,9 +193,43 @@ export async function searchRelevantContext(
   }
 }
 
+// ── Synonym map for broader FTS5 recall ──────────────────
+const SYNONYMS: Record<string, string[]> = {
+  food: ['grocery', 'groceries', 'meal', 'eating', 'restaurant', 'lunch', 'dinner', 'breakfast'],
+  car: ['transport', 'transportation', 'vehicle', 'gas', 'fuel', 'uber', 'lyft'],
+  exercise: ['workout', 'gym', 'run', 'running', 'fitness', 'training'],
+  work: ['office', 'job', 'meeting', 'project'],
+  money: ['expense', 'payment', 'cost', 'bill', 'budget', 'spend', 'spending'],
+  doctor: ['medical', 'health', 'appointment', 'clinic', 'hospital'],
+  shop: ['shopping', 'store', 'purchase', 'buy', 'bought'],
+  travel: ['trip', 'flight', 'hotel', 'vacation'],
+};
+
+// Build reverse map for O(1) lookup
+const _reverseMap = new Map<string, string[]>();
+for (const [key, syns] of Object.entries(SYNONYMS)) {
+  if (!_reverseMap.has(key)) _reverseMap.set(key, []);
+  _reverseMap.get(key)!.push(...syns);
+  for (const s of syns) {
+    if (!_reverseMap.has(s)) _reverseMap.set(s, []);
+    _reverseMap.get(s)!.push(key, ...syns.filter(x => x !== s));
+  }
+}
+
+function expandWithSynonyms(keywords: string[]): string[] {
+  const expanded = new Set(keywords);
+  for (const kw of keywords) {
+    const syns = _reverseMap.get(kw);
+    if (syns) {
+      for (const s of syns) expanded.add(s);
+    }
+  }
+  return [...expanded].slice(0, 15);
+}
+
 /**
  * Extract keywords from user input for FTS5 search.
- * Strips stopwords and common fillers to improve relevance.
+ * Strips stopwords, expands with synonyms for broader recall.
  */
 export function extractKeywords(input: string): string {
   const stopwords = new Set([
@@ -209,11 +243,12 @@ export function extractKeywords(input: string): string {
     'please', 'hey', 'hi', 'hello', 'thanks', 'okay', 'ok', 'yeah', 'yes',
   ]);
 
-  return input
+  const keywords = input
     .toLowerCase()
     .replace(/[^\w\s]/g, ' ')
     .split(/\s+/)
     .filter(w => w.length > 1 && !stopwords.has(w))
-    .slice(0, 10)
-    .join(' ');
+    .slice(0, 10);
+
+  return expandWithSynonyms(keywords).join(' ');
 }

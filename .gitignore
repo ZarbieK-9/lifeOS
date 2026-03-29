@@ -17,14 +17,14 @@ yarn-error.*
 *.pem
 *.key
 
-# Written by self-hosted deploy workflow on the runner
+# Written by deploy on the server
 backend/build-info.json
 
 # Python
 __pycache__/
 *.pyc
 .venv/
-# Generated next to backend/envoy.yaml for self-hosted Envoy
+# Generated next to backend/envoy.yaml for Envoy transcoder
 backend/proto.pb
 .pytest_cache/
 *.egg-info/
@@ -44,6 +44,7 @@ web-build/
 .idea/
 *.swp
 *.swo
+.vscode/
 
 # Android build artifacts
 .gradle/
@@ -54,8 +55,11 @@ web-build/
 # Metro
 .metro-health-check*
 
-# Bundled LLM models (too large for git — download separately)
+# Bundled LLM models (large — add locally if needed)
 frontend/assets/models/*.gguf
 
 # Misc
 *.tsbuildinfo
+
+# Archives / local downloads (do not commit)
+*.zip

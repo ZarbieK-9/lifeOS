@@ -8,7 +8,7 @@ import grpc
 from sqlalchemy import select
 
 from app.db import async_session
-from app.models import ApiKeyModel, AiCommandModel
+from app.models import ApiKeyModel, AiCommandModel, WebhookReplayGuardModel
 from app.auth import generate_id
 
 from gen import lifeos_pb2, lifeos_pb2_grpc
@@ -40,6 +40,7 @@ class WebhookServicer(lifeos_pb2_grpc.WebhookServiceServicer):
         # Extract API key from metadata (Envoy forwards HTTP headers as gRPC metadata)
         metadata = dict(context.invocation_metadata() or [])
         api_key = metadata.get("x-api-key", "")
+        request_id = metadata.get("x-request-id", "")
 
         if not api_key:
             context.set_code(grpc.StatusCode.UNAUTHENTICATED)
@@ -52,10 +53,36 @@ class WebhookServicer(lifeos_pb2_grpc.WebhookServiceServicer):
             context.set_details("Invalid API key")
             return lifeos_pb2.WebhookCommandResponse()
 
+        if request_id:
+            async with async_session() as session:
+                existing = await session.execute(
+                    select(WebhookReplayGuardModel).where(
+                        WebhookReplayGuardModel.user_id == user_id,
+                        WebhookReplayGuardModel.request_id == request_id,
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    return lifeos_pb2.WebhookCommandResponse(
+                        output="Duplicate webhook request ignored.",
+                        status="duplicate",
+                    )
+                session.add(
+                    WebhookReplayGuardModel(
+                        id=generate_id(),
+                        user_id=user_id,
+                        request_id=request_id,
+                    )
+                )
+                await session.commit()
+
         text = request.input
         if not text:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("Input text is required")
+            return lifeos_pb2.WebhookCommandResponse()
+        if len(text) > 1000:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("Input too long")
             return lifeos_pb2.WebhookCommandResponse()
 
         # Reuse existing AI dispatch

@@ -1,0 +1,4 @@
+{"scenario":"hydration_behind_pace","expected_priority":"high_or_low","expected_domain":"health","expects_suggested_tool":"log_hydration"}
+{"scenario":"habit_optimal_time","expected_priority":"low","expected_domain":"health","expects_suggested_tool":"log_habit"}
+{"scenario":"inbox_clarity_coach","expected_priority":"low","expected_domain":"social","expects_suggested_tool":"triage_emails"}
+{"scenario":"calendar_alert_15_min","expected_priority":"high","expected_domain":"productivity","expects_suggested_tool":null}

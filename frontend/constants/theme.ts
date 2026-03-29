@@ -119,9 +119,11 @@ export const Spacing = {
   screenPadding: 20,
   screenPaddingWide: 24,
   sectionSpacing: 24,
+  sectionGap: 24,
   itemSpacing: 12,
   groupCornerRadius: 10,
   cardCornerRadius: 14,
+  cardPadding: 16,
   buttonCornerRadius: 12,
   smallCornerRadius: 8,
   chipRadius: 20,
@@ -131,10 +133,30 @@ export const Spacing = {
 // ── Radii (use for cards, modals, buttons) ─────────────────────────────────
 export const Radii = {
   card: 14,
+  cardMedium: 16,
+  cardLarge: 20,
   button: 12,
   chip: 20,
   input: 12,
   small: 8,
+};
+
+// ── Shadow tokens for elevated cards (light/dark) ─────────────────────────
+export const Shadow = {
+  light: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  dark: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 4,
+  },
 };
 
 export const Fonts = Platform.select({
@@ -233,6 +255,9 @@ export type AppThemePalette = {
   background: string;
   surface: string;
   surfaceElevated: string;
+  surfaceMuted: string;
+  backgroundGradient: readonly [string, string, string];
+  cardGradient: readonly [string, string];
   border: string;
   divider: string;
   text: string;
@@ -254,47 +279,53 @@ export type AppThemePalette = {
 
 export const AppTheme = {
   light: {
-    background: '#ffffff',
-    surface: '#ffffff',
-    surfaceElevated: '#f5f5f5',
-    border: '#e2e8f0',
-    divider: '#e2e8f0',
-    text: '#11181c',
-    textSecondary: '#687076',
-    primary: '#5a8f86',
-    primaryBg: '#e0f2f0',
+    background: '#f5f3ef',
+    surface: '#fcfaf6',
+    surfaceElevated: '#f4efe8',
+    surfaceMuted: '#efe7dd',
+    backgroundGradient: ['#f6f3ee', '#f3f0ea', '#ece7df'],
+    cardGradient: ['#ffffff', '#f7f2eb'],
+    border: '#ded4c8',
+    divider: '#e5dbcf',
+    text: '#201d18',
+    textSecondary: '#6d645b',
+    primary: '#5e8f88',
+    primaryBg: '#dce8e5',
     success: '#10b981',
     successBg: '#d1fae5',
     warn: '#f59e0b',
     warnBg: '#fef3c7',
     danger: '#ef4444',
     dangerBg: '#fee2e2',
-    inputBg: '#f5f5f5',
-    inputBorder: '#c5d4d0',
-    tabBarBg: '#ffffff',
-    tabActive: '#5a8f86',
-    tabInactive: '#687076',
+    inputBg: '#f0ebe4',
+    inputBorder: '#cbbfb2',
+    tabBarBg: '#f7f2ea',
+    tabActive: '#4e7f78',
+    tabInactive: '#8f8478',
   } satisfies AppThemePalette,
   dark: {
-    background: '#000000',
-    surface: '#1a1a1a',
-    surfaceElevated: '#2a2a2a',
-    border: '#333333',
-    divider: '#2a2a2a',
-    text: '#f0f0f0',
-    textSecondary: '#9ca3af',
-    primary: '#6ba89e',
-    primaryBg: '#1e3632',
+    background: '#101213',
+    surface: '#181b1d',
+    surfaceElevated: '#21272b',
+    surfaceMuted: '#2b3339',
+    backgroundGradient: ['#0f1316', '#141a1e', '#1a2025'],
+    cardGradient: ['#20262b', '#171c20'],
+    border: '#2e3941',
+    divider: '#243038',
+    text: '#edf1f3',
+    textSecondary: '#a0adb5',
+    primary: '#78afa7',
+    primaryBg: '#1f3a37',
     success: '#34d399',
     successBg: '#064e3b',
     warn: '#fbbf24',
     warnBg: '#78350f',
     danger: '#f87171',
     dangerBg: '#7f1d1d',
-    inputBg: '#1a1a1a',
-    inputBorder: '#3d4f4b',
-    tabBarBg: '#000000',
-    tabActive: '#6ba89e',
-    tabInactive: '#9aaba6',
+    inputBg: '#1d2327',
+    inputBorder: '#35434c',
+    tabBarBg: '#13181c',
+    tabActive: '#86bcb4',
+    tabInactive: '#8ea0a8',
   } satisfies AppThemePalette,
 } as const;

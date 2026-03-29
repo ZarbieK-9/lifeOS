@@ -138,6 +138,21 @@ export const api = {
     if (result.ok) {
       await setTokens(result.data.access_token, result.data.refresh_token);
       kv.set(USER_ID_KEY, result.data.user_id);
+      kv.set('server_coach_enabled', '1');
+      try {
+        const { cancelScheduledCoachNotifications } = await import(
+          './scheduledCoachNotifications'
+        );
+        await cancelScheduledCoachNotifications();
+      } catch {
+        /* ignore */
+      }
+      import('../store/useStore')
+        .then(({ useStore }) => {
+          useStore.getState().syncUserCoachTimezoneToServer();
+          useStore.getState().pullServerData();
+        })
+        .catch(() => {});
     }
     return result;
   },
@@ -160,6 +175,16 @@ export const api = {
   logout: async () => {
     await clearTokens();
     kv.delete(USER_ID_KEY);
+    kv.delete('server_coach_enabled');
+    kv.delete('coach_timezone_sent');
+    try {
+      const { registerScheduledCoachNotifications } = await import(
+        './scheduledCoachNotifications'
+      );
+      await registerScheduledCoachNotifications();
+    } catch {
+      /* ignore */
+    }
   },
 
   isAuthenticated: async () => !!(await getAccessToken()),
@@ -216,45 +241,7 @@ export const api = {
       body: JSON.stringify(entry),
     }),
 
-  // AI
-  submitAiCommand: (id: string, input: string, contextJson?: string) =>
-    apiFetch<{
-      id: string;
-      output: string;
-      status: string;
-      intents?: Array<{ tool: string; params_json: string }>;
-    }>(
-      '/v1/ai/command',
-      {
-        method: 'POST',
-        body: JSON.stringify({ id, input, context_json: contextJson }),
-      },
-    ),
-
-  // AI agentic turn (multi-turn loop)
-  agentTurn: (params: {
-    session_id?: string;
-    input?: string;
-    context_json?: string;
-    tool_results?: Array<{
-      tool: string;
-      success: boolean;
-      message: string;
-      data_json?: string;
-    }>;
-  }) =>
-    apiFetch<{
-      session_id: string;
-      output: string;
-      intents: Array<{ tool: string; params_json: string }>;
-      done: boolean;
-      turn: number;
-      status: string;
-    }>('/v1/ai/agent-turn', {
-      method: 'POST',
-      body: JSON.stringify(params),
-    }),
-
+  // AI (offline-only; history may still be fetched from backend for sync)
   getAiHistory: () =>
     apiFetch<{ commands: Array<Record<string, unknown>> }>('/v1/ai/history'),
 
@@ -377,5 +364,87 @@ export const api = {
   revokeApiKey: (keyId: string) =>
     apiFetch<Record<string, unknown>>(`/v1/apikeys/${keyId}`, {
       method: 'DELETE',
+    }),
+
+  // Coach + push (server-side coach migration)
+  listCoachNotifications: (params?: { unreadOnly?: boolean; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.unreadOnly !== undefined) q.set('unreadOnly', String(params.unreadOnly));
+    if (params?.limit != null) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return apiFetch<{
+      notifications: Array<{
+        id: string;
+        domain?: string;
+        title?: string;
+        body?: string;
+        priority?: string;
+        read?: boolean;
+        ruleId?: string;
+        rule_id?: string;
+        createdAt?: string;
+        created_at?: string;
+      }>;
+    }>(`/v1/coach/notifications${qs ? `?${qs}` : ''}`);
+  },
+
+  markCoachNotificationsRead: (ids: string[]) =>
+    apiFetch<{ updated: number }>('/v1/coach/notifications/read', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+
+  markCoachNotificationsActed: (ids: string[]) =>
+    apiFetch<{ updated: number }>('/v1/coach/notifications/acted', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+
+  listCoachingCommitments: () =>
+    apiFetch<{
+      commitments: Array<{
+        id: string;
+        suggestion?: string;
+        reason?: string | null;
+        dateSuggested?: string;
+        date_suggested?: string;
+        dateDue?: string | null;
+        date_due?: string | null;
+        adopted?: boolean;
+        outcome?: string | null;
+        createdAt?: string;
+        created_at?: string;
+      }>;
+    }>('/v1/coach/commitments/list'),
+
+  upsertCoachingCommitments: (
+    commitments: Array<{
+      id: string;
+      suggestion: string;
+      reason?: string | null;
+      date_suggested: string;
+      date_due?: string | null;
+      adopted: boolean;
+      outcome?: string | null;
+      created_at?: string;
+    }>,
+  ) =>
+    apiFetch<{ upserted: number }>('/v1/coach/commitments', {
+      method: 'POST',
+      body: JSON.stringify({ commitments }),
+    }),
+
+  registerPushToken: (body: {
+    device_id?: string;
+    token: string;
+    platform?: string;
+  }) =>
+    apiFetch<Record<string, unknown>>('/v1/push/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        device_id: body.device_id,
+        token: body.token,
+        platform: body.platform,
+      }),
     }),
 };

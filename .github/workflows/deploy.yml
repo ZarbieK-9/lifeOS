@@ -46,6 +46,6 @@ jobs:
           cd /home/zarbie/Downloads/lifeOS
           git fetch origin main
           git reset --hard origin/main
-          chmod +x scripts/deploy-lifeos-backend.sh
-          exec bash scripts/deploy-lifeos-backend.sh
+          chmod +x backend/scripts/deploy.sh
+          exec bash backend/scripts/deploy.sh
           REMOTE_SCRIPT

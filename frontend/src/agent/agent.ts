@@ -1,207 +1,281 @@
-// PicoClaw Agent — Main Orchestrator
-// Two modes:
-//   ONLINE:  send to backend → Gemini agentic loop → execute tools locally
-//   OFFLINE: on-device LLM (llama.rn) → agentic loop → execute tools locally
+// PicoClaw Agent — Main Orchestrator (offline-only)
+// On-device LLM (llama.rn) → agentic loop → execute tools locally
+//
+// NEW: Domain agents + tools (LLM calls tools; no regex goal shortcut).
+// Plans from prior sessions: executeAllPendingPlans on init.
 
-import type { AgentResponse, ToolResult, Routine, MatchedIntent } from './types';
-import { toolRegistry } from './tools';
+import type { AgentResponse, Routine, RoutineStep } from './types';
+import { executeToolWithGoalContext, toolRegistry } from './tools';
 import { gatherContext, detectContextNeeds } from './context';
 import { routeIntent } from './router';
-import { api } from '../services/api';
-import { uid } from '../db/database';
 import { useStore } from '../store/useStore';
 import { LlamaService } from '../llm/LlamaService';
 import { FAST_MODEL, HEAVY_MODEL } from '../llm/types';
+import { eventBus } from './eventBus';
+import { executeAllPendingPlans } from './executor';
+import { analyzePatterns, updatePatternsForTool } from './patterns';
+import { evaluate as evaluateWatcher, initWatcher, setNotifyCallback } from './watcher';
+import { domainAgents } from './domains/index';
+import { recordStageLatency } from './latency';
 
 export interface RunOptions {
-  /** Whether the device is online and authenticated with backend. */
-  online?: boolean;
   /** Command ID (pre-created by the store). */
   cmdId?: string;
 }
 
+export interface VoiceRunOptions extends RunOptions {
+  handsFree?: boolean;
+}
+
+// ── Initialization ────────────────────────────────
+
+let _initialized = false;
+let _watcherCleanup: (() => void) | null = null;
+let _lastWarmAt = 0;
+
 /**
- * Run the PicoClaw agent against user input.
+ * Initialize the agentic system. Call once at app boot.
+ * - Loads goals, plans, patterns from DB
+ * - Starts the watcher
+ * - Subscribes domain agents to the event bus
+ * - Runs initial pattern analysis
+ */
+export async function initAgentSystem(
+  notifyFn?: (title: string, body: string, priority: 'high' | 'low') => void,
+): Promise<void> {
+  if (_initialized) return;
+  _initialized = true;
+
+  const tag = '[PicoClaw init]';
+  console.time(tag);
+
+  // Agentic state (goals, plans, patterns, watcher queue) is already loaded by store.init()
+  // This function only sets up event bus, watcher, and domain agents.
+
+  // Set up push notification callback
+  if (notifyFn) setNotifyCallback(notifyFn);
+
+  // Subscribe domain agents to the event bus
+  for (const agent of domainAgents) {
+    eventBus.onAny((event) => agent.onEvent(event).catch(() => {}));
+  }
+
+  // Incremental pattern updates on tool execution
+  eventBus.on('tool_result', (event) => {
+    updatePatternsForTool(event.tool).catch(() => {});
+  });
+
+  // Start the watcher
+  _watcherCleanup = initWatcher();
+
+  // Run initial pattern analysis (background, don't block boot)
+  analyzePatterns().catch((e) => console.warn('[Agent] initial pattern analysis failed:', e));
+
+  // Execute any pending plans from previous session
+  executeAllPendingPlans().catch((e) => console.warn('[Agent] pending plan execution failed:', e));
+
+  console.timeEnd(tag);
+}
+
+/** Teardown the agent system (for testing / hot reload). */
+export function teardownAgentSystem(): void {
+  if (_watcherCleanup) _watcherCleanup();
+  eventBus.clear();
+  _initialized = false;
+}
+
+// ── Existing patterns ─────────────────────────────
+
+const PLAN_MY_DAY_PATTERN = /\b(plan\s+my\s+day|organize\s+my\s+day|plan\s+today|organize\s+today)\b/i;
+
+/** Prompt used when user asks to plan or organize their day (full calendar + tasks context). */
+const PLAN_MY_DAY_PROMPT = `[SYSTEM: PLAN MY DAY] The user asked you to plan their day. Use the calendar and tasks in the context below. Create a time-ordered plan for today: use create_event for fixed-time items, add_task for to-dos. Then summarize the plan in 2-3 short sentences.`;
+
+const CREATE_ROUTINE_PATTERN = /\b(create|save|make|add|define)\s+(a\s+)?routine\b|routine\s*:\s*.+|when\s+i\s+say\s+.+\s+do\s+/i;
+
+const ROUTINE_JSON_SYSTEM = `You output only valid JSON. No markdown, no explanation.
+Format: {"name":"Routine name","triggerPhrases":["phrase1","phrase2"],"steps":[{"tool":"log_hydration","params":{"amount_ml":250}},{"tool":"add_task","params":{"title":"Task title","priority":"medium"}}]}.
+Use only these tools: log_hydration, add_task, complete_task, delete_task, set_focus_mode, query_tasks, query_hydration, query_calendar, create_event, schedule_reminder, log_sleep, query_sleep.`;
+
+/**
+ * If the user is asking to create a routine from natural language, run the heavy model to extract JSON, save the routine, and return a response. Otherwise return null.
+ */
+async function tryCreateRoutineFromNaturalLanguage(input: string): Promise<AgentResponse | null> {
+  if (!CREATE_ROUTINE_PATTERN.test(input.trim())) return null;
+
+  const state = useStore.getState();
+  if (!state.llmModelPath || state.llmModelStatus === 'not_downloaded' || state.llmModelStatus === 'error' || state.llmModelStatus === 'downloading') {
+    return null;
+  }
+
+  try {
+    await LlamaService.loadHeavy(state.llmModelPath, HEAVY_MODEL.contextSize);
+  } catch {
+    return null;
+  }
+
+  const userPrompt = `The user wants to create a routine. Their description: "${input.trim()}"
+Output a JSON object with: "name" (string), "triggerPhrases" (array of strings, e.g. ["morning routine", "start my day"]), "steps" (array of {"tool": "tool_name", "params": {...}}). Output ONLY the JSON object.`;
+
+  let raw: string;
+  try {
+    raw = await LlamaService.completeHeavyTextOnly(userPrompt, ROUTINE_JSON_SYSTEM);
+  } catch {
+    return null;
+  }
+
+  const jsonStr = raw.replace(/```\w*\n?/g, '').replace(/\n/g, ' ').trim();
+  const match = jsonStr.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+
+  let parsed: { name?: string; triggerPhrases?: string[]; steps?: Array<{ tool: string; params?: Record<string, unknown> }> };
+  try {
+    parsed = JSON.parse(match[0]) as typeof parsed;
+  } catch {
+    return null;
+  }
+
+  const name = (parsed.name && String(parsed.name).trim()) || 'My routine';
+  const triggerPhrases = Array.isArray(parsed.triggerPhrases)
+    ? parsed.triggerPhrases.map((p) => String(p).trim()).filter(Boolean)
+    : ['my routine'];
+  const rawSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
+
+  const steps: RoutineStep[] = [];
+  for (const s of rawSteps) {
+    const tool = s?.tool && String(s.tool).trim();
+    if (!tool || !toolRegistry.get(tool)) continue;
+    steps.push({
+      tool,
+      params: (s.params && typeof s.params === 'object') ? s.params as Record<string, unknown> : {},
+    });
+  }
+
+  if (steps.length === 0) {
+    return {
+      input,
+      intents: [],
+      results: [],
+      output: "I couldn't figure out the steps for that routine. Try listing actions like \"log 250ml water\" and \"add task standup\".",
+    };
+  }
+
+  await useStore.getState().addRoutine(name, triggerPhrases.length ? triggerPhrases : [name.toLowerCase()], steps);
+
+  return {
+    input,
+    intents: [],
+    results: [],
+    output: `Routine "${name}" saved with ${steps.length} step(s). Say "${triggerPhrases[0] || name}" to run it.`,
+  };
+}
+
+// ── Main entry point ──────────────────────────────
+
+/**
+ * Run the PicoClaw agent against user input (offline-only).
  *
- * Online path:
- *   1. Gather app context → send to backend (Gemini agentic loop)
- *   2. Execute tools locally → send results back → repeat
- *
- * Offline path:
- *   1. Load on-device LLM (llama.rn) → send input + context
- *   2. Execute tools locally → feed results back → repeat (max 3 turns)
+ * Flow:
+ * 1. Emit user_input event
+ * 2. Check for routine creation (LLM JSON, not regex goals)
+ * 3. Route to LLM (fast/heavy path) — tools perform tasks / create_goal
+ * 4. After response: emit events, patterns, watcher
  */
 export async function run(
   input: string,
   _userRoutines: Routine[] = [],
   options: RunOptions = {}
 ): Promise<AgentResponse> {
-  const { online = false, cmdId } = options;
+  const { cmdId } = options;
   const tag = `[PicoClaw run] "${input.slice(0, 40)}"`;
   console.time(tag);
-  console.log(`${tag} — online=${online}, cmdId=${cmdId}`);
+  console.log(`${tag} cmdId=${cmdId ?? 'none'}`);
 
-  // ── Online path: backend + Gemini ──
-  if (online) {
-    try {
-      const result = await runOnline(input, cmdId);
-      console.timeEnd(tag);
-      return result;
-    } catch (e) {
-      console.warn('[PicoClaw] Online path failed, falling back to offline:', e);
+  // Emit user input event
+  eventBus.emit({ type: 'user_input', input, cmdId });
+
+  // Auto-generate chat title from first user message
+  const state = useStore.getState();
+  if (state.currentChatId) {
+    const session = state.chatSessions.find((s) => s.id === state.currentChatId);
+    if (session && !session.title) {
+      const title = input.replace(/\[.*?\]/g, '').slice(0, 40).trim() || 'Chat';
+      state.updateChatTitle(state.currentChatId, title).catch(() => {});
     }
   }
 
-  // ── Offline path: on-device LLM ──
-  const result = await runOffline(input);
+  // 1. Create routine from natural language
+  const routineResult = await tryCreateRoutineFromNaturalLanguage(input);
+  if (routineResult) {
+    console.timeEnd(tag);
+    return routineResult;
+  }
+
+  // 2. Plan my day / organize my day → use structured prompt
+  const effectiveInput = PLAN_MY_DAY_PATTERN.test(input.trim()) ? PLAN_MY_DAY_PROMPT : input;
+
+  // 3. Run through LLM (tools + domain agents handle actions)
+  const result = await runOffline(effectiveInput);
+
+  // 4. Post-processing: emit events + update patterns (background)
+  postProcess(input, result).catch(() => {});
+
   console.timeEnd(tag);
   console.log('[PicoClaw] AI output:', result.output?.slice(0, 300) + (result.output && result.output.length > 300 ? '…' : ''));
   return result;
 }
 
-/**
- * Online path: agentic multi-turn loop.
- *
- * 1. Send input + context to backend → Gemini may return tool calls
- * 2. Execute tools locally → send results back to backend
- * 3. Gemini sees results → decides: more tools or final answer
- * 4. Repeat (max MAX_AGENT_TURNS)
- */
-const MAX_AGENT_TURNS = 5;
-
-async function runOnline(
+/** Voice-first entry point: capture -> plan -> execute with policy/approval gates. */
+export async function runVoiceCommand(
   input: string,
-  cmdId?: string
+  options: VoiceRunOptions = {},
 ): Promise<AgentResponse> {
-  const tag = '[PicoClaw online]';
-  console.time(`${tag} total`);
-
-  const id = cmdId || uid();
-
-  // Smart context — only gather what the input needs
-  const needs = detectContextNeeds(input);
-  console.time(`${tag} gatherContext`);
-  const contextJson = await gatherContext(needs);
-  console.timeEnd(`${tag} gatherContext`);
-
-  // Accumulate across turns
-  const allIntents: MatchedIntent[] = [];
-  const allResults: ToolResult[] = [];
-  let aiMessage = '';
-
-  // ── Turn 1: send user input + context ──
-  console.time(`${tag} agentTurn #1`);
-  const firstResult = await api.agentTurn({
-    input,
-    context_json: contextJson,
-  });
-  console.timeEnd(`${tag} agentTurn #1`);
-
-  if (!firstResult.ok) {
-    throw new Error(firstResult.error || 'Backend request failed');
-  }
-
-  let sessionId = firstResult.data.session_id;
-  aiMessage = firstResult.data.output || '';
-  let turnData = firstResult.data;
-
-  // ── Agentic loop ──
-  let turnCount = 0;
-  console.log(`${tag} turn1 done=${turnData.done}, intents=${turnData.intents?.length ?? 0}`);
-  while (!turnData.done && turnData.intents?.length > 0 && turnCount < MAX_AGENT_TURNS) {
-    turnCount++;
-
-    // Parse intents from this turn
-    const turnIntents: MatchedIntent[] = (turnData.intents || []).map((intent, i) => ({
-      tool: intent.tool,
-      params: JSON.parse(intent.params_json || '{}'),
-      priority: 100 - i,
-    }));
-
-    // Execute tools locally
-    console.time(`${tag} tools turn#${turnCount}`);
-    const turnResults: ToolResult[] = [];
-    for (const intent of turnIntents) {
-      const tool = toolRegistry.get(intent.tool);
-      if (!tool) {
-        turnResults.push({ success: false, message: `Unknown tool: ${intent.tool}` });
-        continue;
-      }
-      try {
-        console.time(`${tag} tool:${intent.tool}`);
-        const toolResult = await tool.execute(intent.params);
-        console.timeEnd(`${tag} tool:${intent.tool}`);
-        turnResults.push(toolResult);
-      } catch (e) {
-        console.timeEnd(`${tag} tool:${intent.tool}`);
-        turnResults.push({
-          success: false,
-          message: `Error executing ${intent.tool}: ${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
-    }
-    console.timeEnd(`${tag} tools turn#${turnCount}`);
-
-    allIntents.push(...turnIntents);
-    allResults.push(...turnResults);
-
-    // Send tool results back to backend for next Gemini turn
-    const toolResultMsgs = turnIntents.map((intent, i) => ({
-      tool: intent.tool,
-      success: turnResults[i].success,
-      message: turnResults[i].message,
-      data_json: turnResults[i].data ? JSON.stringify(turnResults[i].data) : '',
-    }));
-
-    console.time(`${tag} agentTurn #${turnCount + 1}`);
-    const contResult = await api.agentTurn({
-      session_id: sessionId,
-      tool_results: toolResultMsgs,
-    });
-    console.timeEnd(`${tag} agentTurn #${turnCount + 1}`);
-
-    if (!contResult.ok) {
-      // If continuation fails, use what we have so far
-      console.warn('[PicoClaw] Continuation turn failed:', contResult.error);
-      break;
-    }
-
-    turnData = contResult.data;
-    console.log(`${tag} turn${turnCount + 1} done=${turnData.done}, intents=${turnData.intents?.length ?? 0}`);
-    // Update AI message — the final turn's output is the synthesized answer
-    if (turnData.output) {
-      aiMessage = turnData.output;
-    }
-  }
-
-  // Build final output
-  let finalOutput: string;
-
-  if (allIntents.length === 0) {
-    // Pure conversational response
-    finalOutput = aiMessage || `Understood: "${input}"`;
-  } else if (aiMessage) {
-    // Gemini's final message already incorporates tool results (agentic loop)
-    finalOutput = aiMessage;
-  } else {
-    // Fallback: just tool output
-    finalOutput = allResults.map(r => r.message).join('\n');
-  }
-
-  await extractAndStoreMemories(finalOutput, id);
-
-  console.log(`${tag} done — ${turnCount} agentic turns, ${allIntents.length} tools called`);
-  console.timeEnd(`${tag} total`);
-
-  return {
-    input,
-    intents: allIntents,
-    results: allResults,
-    output: finalOutput,
-  };
+  const prefixed = options.handsFree ? `[VOICE] ${input}` : input;
+  return run(prefixed, [], options);
 }
 
-// ── Proactive AI ──────────────────────────────────────
+/** Simulate weekly actions without side effects. */
+export async function simulateWeekPlan(): Promise<AgentResponse> {
+  const prompt =
+    "[SYSTEM: SIMULATION] Show what you would do this week without executing tools. Include priorities, reminders, and policy checks.";
+  const prev = useStore.getState().simulationMode;
+  useStore.getState().setSimulationMode(true);
+  try {
+    return await run(prompt);
+  } finally {
+    useStore.getState().setSimulationMode(prev);
+  }
+}
+
+/** Post-processing after LLM response: events, patterns, watcher. */
+async function postProcess(input: string, result: AgentResponse): Promise<void> {
+  const postStart = Date.now();
+  // Check if any tool results should progress a goal
+  for (const toolResult of result.results) {
+    if (toolResult.success) {
+      // Domain agents handle goal progress via event bus (onEvent)
+      // The tool_result events are emitted by LlamaService during execution
+    }
+  }
+
+  // Refresh patterns periodically (every 10th message)
+  const cmds = useStore.getState().aiCommands;
+  if (cmds.length % 10 === 0) {
+    await analyzePatterns();
+  }
+  const postStats = recordStageLatency('post_process', Date.now() - postStart);
+  useStore
+    .getState()
+    .enqueueEvent('agent_outcome', {
+      source: 'agent',
+      phase: 'post_process',
+      post_p50_ms: postStats.p50,
+      post_p95_ms: postStats.p95,
+    })
+    .catch(() => {});
+}
+
+// ── Proactive AI (enhanced with watcher) ──────────
 
 export type ProactiveType = 'morning' | 'checkin' | 'evening' | 'calendar_alert' | 'calendar_gap' | 'email_alert' | 'notification_alert';
 
@@ -213,14 +287,13 @@ export interface ProactiveOptions {
 }
 
 /**
- * Run a proactive AI message (scheduled or event-driven).
- * Uses backend when online and authenticated; otherwise falls back to offline (local) response.
+ * Run a proactive AI message. Now enhanced with watcher insights.
+ * The watcher handles most proactive behavior; this is kept for
+ * backward compatibility with notification handlers that use specific types.
  */
 export async function runProactive(options: ProactiveOptions): Promise<AgentResponse> {
   const prompt = buildProactivePrompt(options.type, options.detail);
-  const state = useStore.getState();
-  const online = !!(state.isOnline && state.isAuthenticated);
-  return run(prompt, [], { online, cmdId: options.cmdId });
+  return run(prompt, [], { cmdId: options.cmdId });
 }
 
 function buildProactivePrompt(type: ProactiveType, detail?: string): string {
@@ -242,7 +315,43 @@ function buildProactivePrompt(type: ProactiveType, detail?: string): string {
   }
 }
 
-// ── Memory extraction ─────────────────────────────────
+// ── App lifecycle hooks ───────────────────────────
+
+/** Call when app comes to foreground. Triggers watcher evaluation + pattern refresh. */
+export function onAppForeground(): void {
+  eventBus.emit({ type: 'app_lifecycle', action: 'foreground' });
+  warmCriticalPaths().catch(() => {});
+}
+
+/** Call when app goes to background. */
+export function onAppBackground(): void {
+  eventBus.emit({ type: 'app_lifecycle', action: 'background' });
+}
+
+async function warmCriticalPaths(): Promise<void> {
+  const now = Date.now();
+  // Keep warm window modest to avoid battery churn.
+  if (now - _lastWarmAt < 2 * 60 * 1000) return;
+  _lastWarmAt = now;
+
+  const state = useStore.getState();
+  try {
+    if (state.llmFastModelPath && state.llmFastModelStatus === 'ready') {
+      await LlamaService.loadFast(state.llmFastModelPath, FAST_MODEL.contextSize);
+    }
+  } catch {
+    // best-effort warm path
+  }
+
+  try {
+    const needs = { calendar: false, emails: false, tasks: true, notes: false, mood: false, expenses: false, full: false };
+    await gatherContext(needs, 900, 'quick warmup', state.currentChatId ?? null);
+  } catch {
+    // best-effort cache/context warm path
+  }
+}
+
+// ── Memory extraction ─────────────────────────────
 
 const REMEMBER_PATTERN = /\[REMEMBER:\s*(.+?)\]/g;
 
@@ -268,15 +377,56 @@ export async function extractAndStoreMemories(
 /** Strip [SYSTEM: ...] tags from output (model sometimes echoes these). */
 const SYSTEM_TAG_PATTERN = /\[SYSTEM:\s*[^\]]*\]/g;
 
+/** Strip [PLAN: ...] reasoning tags (visible scaffolding for small models). */
+const PLAN_TAG_PATTERN = /\[PLAN:\s*[^\]]*\]/g;
+
+/** Detect [CLARIFY: ...] tags (model is asking for clarification). */
+const CLARIFY_TAG_PATTERN = /\[CLARIFY:\s*([^\]]*)\]/g;
+
 /**
- * Strip [REMEMBER: ...] and [SYSTEM: ...] tags from output for display.
+ * Strip internal tags from output for display.
+ * Preserves [CLARIFY:] content but reformats it as a natural question.
  */
 export function cleanOutput(output: string): string {
-  return output
+  // Extract clarification requests and reformat as natural questions
+  let cleaned = output;
+  const clarifyMatches = [...cleaned.matchAll(CLARIFY_TAG_PATTERN)];
+  for (const match of clarifyMatches) {
+    const question = match[1].trim();
+    // Replace the tag with a natural question
+    cleaned = cleaned.replace(match[0], question.endsWith('?') ? question : `${question}?`);
+  }
+
+  return cleaned
     .replace(REMEMBER_PATTERN, '')
     .replace(SYSTEM_TAG_PATTERN, '')
+    .replace(PLAN_TAG_PATTERN, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/**
+ * Generate a short suggested reply for a message (e.g. notification body) using the fast model.
+ * Returns null if the model isn't loaded or generation fails.
+ */
+export async function generateSuggestedReply(messageSnippet: string): Promise<string | null> {
+  const state = useStore.getState();
+  if (!state.llmFastModelPath || state.llmFastModelStatus === 'not_downloaded' || state.llmFastModelStatus === 'error' || state.llmFastModelStatus === 'downloading') {
+    return null;
+  }
+  try {
+    await LlamaService.loadFast(state.llmFastModelPath, FAST_MODEL.contextSize);
+  } catch {
+    return null;
+  }
+  const prompt = `Suggest a single short reply (1 line, casual) to this message. Output ONLY the reply, no quotes or explanation.\nMessage: ${messageSnippet.slice(0, 300)}`;
+  try {
+    const result = await LlamaService.completeFast(prompt, '{}');
+    const reply = (result.message || '').replace(/^["']|["']$/g, '').trim().slice(0, 200);
+    return reply.length > 0 ? reply : null;
+  } catch {
+    return null;
+  }
 }
 
 // ── Model routing via Intent Pre-Router ──────────────
@@ -292,9 +442,60 @@ async function runOffline(input: string): Promise<AgentResponse> {
   const tag = '[PicoClaw offline]';
   console.time(`${tag} total`);
 
+  const routeStart = Date.now();
   const routing = routeIntent(input);
+  const routeStats = recordStageLatency('route', Date.now() - routeStart);
   const state = useStore.getState();
   console.log(`${tag} intent=${routing.intent}, useHeavy=${routing.useHeavy}, tools=${routing.includeTools}, fastPath=${!!state.llmFastModelPath}, heavyPath=${!!state.llmModelPath}`);
+  useStore.getState().logAgentAction({
+    agent: 'router',
+    actionType: 'monitor',
+    input,
+    output: JSON.stringify({
+      intent: routing.intent,
+      useHeavy: routing.useHeavy,
+      includeTools: routing.includeTools,
+      contextBudget: routing.contextBudget,
+      directTool: routing.directTool?.tool ?? null,
+      route_p50_ms: routeStats.p50,
+      route_p95_ms: routeStats.p95,
+    }),
+    goalId: null,
+    planId: null,
+    success: true,
+  }).catch(() => {});
+
+  if (routing.directTool && routing.intent === 'action') {
+    const validateStart = Date.now();
+    recordStageLatency('validate', Date.now() - validateStart);
+
+    const toolStart = Date.now();
+    const toolResult = await executeToolWithGoalContext(
+      routing.directTool.tool,
+      routing.directTool.params,
+    );
+    const toolStats = recordStageLatency('tool_execution', Date.now() - toolStart);
+    useStore
+      .getState()
+      .enqueueEvent('agent_outcome', {
+        source: 'router',
+        phase: 'direct_dispatch',
+        tool: routing.directTool.tool,
+        reason: routing.directTool.reason,
+        success: toolResult.success,
+        tool_p50_ms: toolStats.p50,
+        tool_p95_ms: toolStats.p95,
+      })
+      .catch(() => {});
+
+    console.timeEnd(`${tag} total`);
+    return {
+      input,
+      intents: [{ tool: routing.directTool.tool, params: routing.directTool.params }],
+      results: [toolResult],
+      output: toolResult.message,
+    };
+  }
 
   // ── Fast path: 0.5B model for chat + simple queries ──
   if (!routing.useHeavy) {
@@ -329,23 +530,30 @@ function makeStreamCallbacks() {
 }
 
 /** Fast offline path — 0.5B model, no tools, instant responses. */
-async function runOfflineFast(input: string, routing?: import('./router').RoutingDecision): Promise<AgentResponse> {
+async function runOfflineFast(input: string, routing?: import('./router').RoutingDecision, _noFallback?: boolean): Promise<AgentResponse> {
   const tag = '[PicoClaw fast]';
   console.time(`${tag} total`);
 
   const state = useStore.getState();
+  const unavailableResponse = (reason: string): AgentResponse => ({
+    input,
+    intents: [],
+    results: [],
+    output: `The AI model isn't available right now (${reason}). Please try again in a moment.`,
+  });
 
-  // Fast model not available → fall through to heavy
+  // Fast model not available → fall through to heavy (unless recursion guard)
   if (!state.llmFastModelPath || state.llmFastModelStatus === 'not_downloaded' || state.llmFastModelStatus === 'error') {
-    console.log(`${tag} fast model not available, falling through to heavy`);
+    console.log(`${tag} fast model not available${_noFallback ? ' (no fallback)' : ', falling through to heavy'}`);
     console.timeEnd(`${tag} total`);
+    if (_noFallback) return unavailableResponse('fast model not available');
     return runOfflineHeavy(input, routing);
   }
 
   if (state.llmFastModelStatus === 'downloading') {
-    // Fast model still downloading — try heavy, or show downloading message
-    console.log(`${tag} fast model downloading, trying heavy`);
+    console.log(`${tag} fast model downloading${_noFallback ? ' (no fallback)' : ', trying heavy'}`);
     console.timeEnd(`${tag} total`);
+    if (_noFallback) return unavailableResponse('model still downloading');
     return runOfflineHeavy(input, routing);
   }
 
@@ -355,8 +563,9 @@ async function runOfflineFast(input: string, routing?: import('./router').Routin
     await LlamaService.loadFast(state.llmFastModelPath, FAST_MODEL.contextSize);
   } catch (e: any) {
     console.timeEnd(`${tag} loadFast`);
-    console.warn(`${tag} fast model load failed, falling through to heavy:`, e.message);
+    console.warn(`${tag} fast model load failed${_noFallback ? ' (no fallback)' : ', falling through to heavy'}:`, e.message);
     console.timeEnd(`${tag} total`);
+    if (_noFallback) return unavailableResponse('model load failed');
     return runOfflineHeavy(input, routing);
   }
   console.timeEnd(`${tag} loadFast`);
@@ -365,7 +574,8 @@ async function runOfflineFast(input: string, routing?: import('./router').Routin
   const needs = routing?.contextNeeds ?? detectContextNeeds(input);
   const budget = routing?.contextBudget ?? 1500;
   console.time(`${tag} gatherContext`);
-  const contextJson = await gatherContext(needs, budget, input);
+  const chatId = useStore.getState().currentChatId;
+  const contextJson = await gatherContext(needs, budget, input, chatId);
   console.timeEnd(`${tag} gatherContext`);
 
   // Run fast completion with streaming
@@ -399,14 +609,23 @@ async function runOfflineHeavy(input: string, routing?: import('./router').Routi
 
   const state = useStore.getState();
 
-  // Model not ready — tell the user
-  if (!state.llmModelPath || state.llmModelStatus === 'not_downloaded' || state.llmModelStatus === 'error') {
+  // Model not ready — differentiated messages
+  if (!state.llmModelPath || state.llmModelStatus === 'not_downloaded') {
     console.timeEnd(`${tag} total`);
     return {
       input,
       intents: [],
       results: [],
-      output: "I'm offline and the AI model isn't available yet. Please connect to the internet so I can help you.",
+      output: "Download the offline model in Settings to use PicoClaw without the internet.",
+    };
+  }
+  if (state.llmModelStatus === 'error') {
+    console.timeEnd(`${tag} total`);
+    return {
+      input,
+      intents: [],
+      results: [],
+      output: "Offline model failed to load. Try re-downloading it in Settings or restarting the app.",
     };
   }
 
@@ -417,7 +636,7 @@ async function runOfflineHeavy(input: string, routing?: import('./router').Routi
       input,
       intents: [],
       results: [],
-      output: `I'm downloading the reasoning model (${pct}%)... I'll be ready to help offline soon. Try again in a moment.`,
+      output: `Downloading the reasoning model (${pct}%)… Try again in a moment.`,
     };
   }
 
@@ -428,12 +647,16 @@ async function runOfflineHeavy(input: string, routing?: import('./router').Routi
     await LlamaService.loadHeavy(state.llmModelPath, HEAVY_MODEL.contextSize);
   } catch (e: any) {
     console.timeEnd(`${tag} loadHeavy`);
-    useStore.setState({ llmModelStatus: 'error', llmError: e.message });
+    useStore.setState({ llmModelStatus: 'error', llmError: e?.message });
+    const msg = e?.message ?? '';
+    const isNativeModuleMissing = /native module not available|not available\. Run/i.test(msg);
     return {
       input,
       intents: [],
       results: [],
-      output: "Offline AI isn't available in this build. Run `npx expo prebuild --clean` and build a dev client to use on-device AI.",
+      output: isNativeModuleMissing
+        ? "On-device AI needs a dev build. Run `npx expo prebuild --clean` and build the app (Expo Go doesn't support it)."
+        : "Offline model failed to load. Try re-downloading it in Settings or restarting the app.",
     };
   }
   console.timeEnd(`${tag} loadHeavy`);
@@ -441,32 +664,65 @@ async function runOfflineHeavy(input: string, routing?: import('./router').Routi
 
   // Smart context — use router's needs + budget, or fall back to defaults
   const needs = routing?.contextNeeds ?? detectContextNeeds(input);
-  const budget = routing?.contextBudget ?? 3000;
+  const budget = routing?.contextBudget ?? 4500;
   console.time(`${tag} gatherContext`);
-  const contextJson = await gatherContext(needs, budget, input);
+  const chatId = useStore.getState().currentChatId;
+  const contextJson = await gatherContext(needs, budget, input, chatId);
   console.timeEnd(`${tag} gatherContext`);
   console.log(`${tag} calling LLM with context (${contextJson.length} chars)`);
 
+  const isSimulation = useStore.getState().simulationMode;
   // Run agentic completion with streaming
   const stream = makeStreamCallbacks();
   console.time(`${tag} complete`);
   try {
-    const result = await LlamaService.complete(input, contextJson, stream.callbacks);
+    const result = await LlamaService.complete(input, contextJson, stream.callbacks, {
+      includeTools: isSimulation ? false : (routing?.includeTools ?? true),
+    });
     console.timeEnd(`${tag} complete`);
     stream.clear();
 
     await extractAndStoreMemories(result.message);
+
+    // Emit tool_result events for any tools executed during the LLM loop
+    for (let i = 0; i < result.intents.length; i++) {
+      const intent = result.intents[i];
+      const toolResult = result.results[i];
+      if (intent && toolResult) {
+        eventBus.emit({
+          type: 'tool_result',
+          tool: intent.tool,
+          params: intent.params,
+          result: toolResult,
+        });
+      }
+    }
 
     console.timeEnd(`${tag} total`);
     return {
       input,
       intents: result.intents,
       results: result.results,
-      output: result.message,
+      output: isSimulation ? `[simulation] ${result.message}` : result.message,
     };
   } catch (e) {
     console.timeEnd(`${tag} complete`);
     stream.clear();
-    throw e;
+    console.warn(`${tag} heavy completion failed, falling back to fast model:`, e);
+    try {
+      const fastResult = await runOfflineFast(input, routing, true);
+      return {
+        ...fastResult,
+        output: `[Using quick model — complex actions may not work]\n${fastResult.output}`,
+      };
+    } catch (fastErr) {
+      console.warn(`${tag} fast fallback also failed:`, fastErr);
+      return {
+        input,
+        intents: [],
+        results: [],
+        output: 'Both AI models had trouble with that request. Try again in a moment, or restart the app.',
+      };
+    }
   }
 }

@@ -1,8 +1,10 @@
 // PicoClaw Agent — Tool Registry
-// 14 tools with schemas + async executors backed by the Zustand store
+// Schemas + async executors backed by the Zustand store (LLM chooses tools)
 
-import type { Tool, ToolResult } from './types';
+import type { GoalDomain, PlanStep, Tool, ToolResult } from './types';
 import { useStore } from '../store/useStore';
+import { eventBus } from './eventBus';
+import { withTimeout } from '../utils/timeout';
 import dayjs from 'dayjs';
 
 function ok(message: string, data?: unknown): ToolResult {
@@ -11,6 +13,32 @@ function ok(message: string, data?: unknown): ToolResult {
 
 function fail(message: string): ToolResult {
   return { success: false, message };
+}
+
+// ── Goal-progress framing ─────────────────────────
+// Maps tool names to goal domains so we can append progress context.
+const TOOL_GOAL_DOMAINS: Record<string, { domain: string; unit?: string }> = {
+  log_hydration: { domain: 'health', unit: 'ml' },
+  complete_task: { domain: 'productivity', unit: 'tasks' },
+  log_habit: { domain: 'health' },
+  log_expense: { domain: 'finance' },
+};
+
+/** Enrich a tool result with active goal progress if applicable. */
+function enrichWithGoalProgress(toolName: string, result: ToolResult): ToolResult {
+  if (!result.success) return result;
+  const mapping = TOOL_GOAL_DOMAINS[toolName];
+  if (!mapping) return result;
+
+  const goals = useStore.getState().goals.filter(
+    (g) => g.domain === mapping.domain && g.status === 'active' && g.targetValue != null,
+  );
+  if (goals.length === 0) return result;
+
+  const goal = goals[0]; // primary goal in this domain
+  const pct = Math.round((goal.currentValue / goal.targetValue!) * 100);
+  const progressNote = ` (${goal.title}: ${pct}% complete)`;
+  return { ...result, message: result.message + progressNote };
 }
 
 // ── Tool definitions ──────────────────────────────────
@@ -1006,6 +1034,135 @@ const setBudgetTool: Tool = {
   },
 };
 
+const createGoalTool: Tool = {
+  name: 'create_goal',
+  description:
+    'Create a tracked goal. Optionally pass plan_steps_json: a JSON array of { "tool": string, "params": object } for setup (e.g. set_hydration_reminder, add_habit, schedule_reminder). Use when the user commits to an outcome; otherwise use action tools directly (add_task, log_hydration, …).',
+  params: {
+    title: { type: 'string', required: true, description: 'Short goal title' },
+    domain: {
+      type: 'string',
+      required: true,
+      description: 'One of: health, productivity, finance, social',
+    },
+    description: { type: 'string', required: false, description: 'One sentence' },
+    target_value: { type: 'number', required: false, description: 'Numeric target if applicable' },
+    unit: { type: 'string', required: false, description: 'e.g. ml, tasks, USD' },
+    deadline: { type: 'string', required: false, description: 'YYYY-MM-DD' },
+    plan_steps_json: {
+      type: 'string',
+      required: false,
+      description:
+        'Optional JSON array of {tool, params} for validated setup steps executed after the goal is created',
+    },
+  },
+  execute: async (params) => {
+    const title = (params.title as string)?.trim();
+    if (!title) return fail('title is required');
+    const domainRaw = (params.domain as string)?.toLowerCase().trim();
+    const validDomains: GoalDomain[] = ['health', 'productivity', 'finance', 'social'];
+    if (!domainRaw || !validDomains.includes(domainRaw as GoalDomain)) {
+      return fail(`domain must be one of: ${validDomains.join(', ')}`);
+    }
+    const domain = domainRaw as GoalDomain;
+
+    const store = useStore.getState();
+    const dup = store.goals.find(
+      (g) => g.domain === domain && g.status === 'active' && g.title.toLowerCase() === title.toLowerCase(),
+    );
+    if (dup) {
+      return fail(`You already have an active goal "${dup.title}" in ${domain}.`);
+    }
+
+    const goalId = await store.addGoal({
+      title,
+      description: (params.description as string)?.trim() || null,
+      domain,
+      targetValue: params.target_value != null ? Number(params.target_value) : null,
+      unit: (params.unit as string)?.trim() || null,
+      deadline: (params.deadline as string)?.trim() || null,
+    });
+
+    eventBus.emit({ type: 'goal_created', goalId, domain, title });
+
+    const raw = (params.plan_steps_json as string | undefined)?.trim();
+    if (!raw) {
+      const t = params.target_value != null ? ` Target: ${params.target_value} ${params.unit ?? ''}.` : '';
+      return ok(`Goal created: "${title}" (${domain}).${t} I'll track your progress.`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return fail('plan_steps_json must be valid JSON.');
+    }
+    if (!Array.isArray(parsed)) {
+      return fail('plan_steps_json must be a JSON array of { tool, params }.');
+    }
+
+    const { uid } = await import('../db/database');
+    const { executePlan } = await import('./executor');
+    const validatedSteps: PlanStep[] = [];
+
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const tool = (item as { tool?: string }).tool;
+      const p = (item as { params?: Record<string, unknown> }).params ?? {};
+      if (typeof tool !== 'string') continue;
+      const vs = validatePlanStep({ tool, params: p });
+      if (vs.ok) {
+        validatedSteps.push({
+          id: uid(),
+          tool,
+          params: vs.params ?? {},
+          status: 'pending',
+        });
+      }
+    }
+
+    if (validatedSteps.length === 0) {
+      return ok(
+        `Goal created: "${title}" (${domain}). No valid entries in plan_steps_json — goal saved without setup steps.`,
+      );
+    }
+
+    const planId = await store.addPlan({
+      goalId,
+      title: `Plan for: ${title}`,
+      steps: validatedSteps,
+      scheduledFor: null,
+    });
+    const plan = useStore.getState().plans.find((p) => p.id === planId);
+    if (!plan) {
+      return ok('Goal created, but the plan could not be loaded to run steps.');
+    }
+    const exec = await executePlan(plan);
+    return ok(
+      `Goal created: "${title}" (${domain}). Ran ${exec.completed}/${validatedSteps.length} setup step(s).`,
+    );
+  },
+};
+
+const updateCommitment: Tool = {
+  name: 'update_commitment',
+  description: 'Update a coaching commitment response (adopted/skipped)',
+  params: {
+    id: { type: 'string', required: true, description: 'Commitment ID' },
+    adopted: { type: 'number', required: true, description: '1 if adopted, 0 if skipped' },
+    outcome: { type: 'string', required: false, description: 'User feedback' },
+  },
+  execute: async (params) => {
+    const { getDatabase } = await import('../db/database');
+    const db = await getDatabase();
+    await db.runAsync(
+      'UPDATE coaching_commitments SET adopted = ?, outcome = ? WHERE id = ?',
+      [params.adopted as number, (params.outcome as string) || null, params.id as string],
+    );
+    return ok('Thanks for the feedback! This helps me coach better.');
+  },
+};
+
 export const toolRegistry: Map<string, Tool> = new Map([
   [addTask.name, addTask],
   [completeTask.name, completeTask],
@@ -1047,8 +1204,105 @@ export const toolRegistry: Map<string, Tool> = new Map([
   [logExpense.name, logExpense],
   [queryExpenses.name, queryExpenses],
   [setBudgetTool.name, setBudgetTool],
+  [createGoalTool.name, createGoalTool],
+  [updateCommitment.name, updateCommitment],
 ]);
 
 export function getTool(name: string): Tool | undefined {
   return toolRegistry.get(name);
+}
+
+// ── Parameter validation + hallucination fixing ───
+
+/** Common parameter name hallucinations by LLMs and their correct mappings per tool. */
+const PARAM_ALIASES: Record<string, Record<string, string>> = {
+  log_hydration: { amount: 'amount_ml', ml: 'amount_ml', water: 'amount_ml', quantity: 'amount_ml' },
+  add_task: { name: 'title', text: 'title', task: 'title', description: 'notes', date: 'dueDate', due: 'dueDate' },
+  complete_task: { title: 'title_match', name: 'title_match', task: 'title_match' },
+  delete_task: { title: 'title_match', name: 'title_match', task: 'title_match' },
+  set_focus_mode: { time: 'durationMin', duration: 'durationMin', minutes: 'durationMin', on: 'enabled', off: 'enabled' },
+  log_sleep: { start: 'action', end: 'action' },
+  log_mood: { level: 'mood', score: 'mood', energy_level: 'energy' },
+  log_expense: { cost: 'amount', price: 'amount', spent: 'amount', type: 'category', desc: 'description', note: 'description' },
+  schedule_reminder: { message: 'text', when: 'text', at: 'text' },
+  add_note: { content: 'body', text: 'body', name: 'title' },
+  add_habit: { title: 'name', habit: 'name', target: 'target_per_day' },
+  log_habit: { name: 'name_match', habit: 'name_match', habit_name: 'name_match' },
+};
+
+/**
+ * Validate and fix tool parameters before execution.
+ * 1. Apply alias mappings (fix hallucinated param names)
+ * 2. Coerce types (string "500" → number 500)
+ * 3. Check required params are present
+ */
+export function validateAndFixParams(toolName: string, tool: Tool, rawParams: Record<string, unknown>): { params: Record<string, unknown>; error?: string } {
+  const fixed: Record<string, unknown> = {};
+  const aliases = PARAM_ALIASES[toolName] ?? {};
+
+  // Step 1: Map aliased param names to correct names
+  for (const [key, value] of Object.entries(rawParams)) {
+    const correctName = aliases[key] ?? key;
+    fixed[correctName] = value;
+  }
+
+  // Step 2: Type coercion based on schema
+  for (const [name, schema] of Object.entries(tool.params)) {
+    if (fixed[name] === undefined) continue;
+
+    if (schema.type === 'number' && typeof fixed[name] === 'string') {
+      const num = Number(fixed[name]);
+      if (!isNaN(num)) fixed[name] = num;
+    }
+    if (schema.type === 'boolean' && typeof fixed[name] === 'string') {
+      const s = (fixed[name] as string).toLowerCase();
+      fixed[name] = s === 'true' || s === 'yes' || s === 'on' || s === '1';
+    }
+  }
+
+  // Step 3: Check required params
+  for (const [name, schema] of Object.entries(tool.params)) {
+    if (schema.required && (fixed[name] === undefined || fixed[name] === null || fixed[name] === '')) {
+      return { params: fixed, error: `Missing required parameter "${name}" for ${toolName}. Expected: ${schema.description ?? schema.type}` };
+    }
+  }
+
+  return { params: fixed };
+}
+
+/** Validate an arbitrary plan step against tool schema. */
+export function validatePlanStep(
+  step: { tool: string; params: Record<string, unknown> },
+): { ok: boolean; params?: Record<string, unknown>; error?: string } {
+  const tool = toolRegistry.get(step.tool);
+  if (!tool) return { ok: false, error: `Unknown tool: ${step.tool}` };
+  const out = validateAndFixParams(step.tool, tool, step.params ?? {});
+  if (out.error) return { ok: false, error: out.error };
+  return { ok: true, params: out.params };
+}
+
+/**
+ * Execute a tool with validation, alias fixing, and goal progress enrichment.
+ * Use this instead of raw tool.execute() for user-facing tool calls.
+ */
+export async function executeToolWithGoalContext(
+  toolName: string,
+  params: Record<string, unknown>,
+): Promise<ToolResult> {
+  const tool = toolRegistry.get(toolName);
+  if (!tool) return fail(`Unknown tool: ${toolName}`);
+
+  // Validate and fix parameters
+  const { params: fixedParams, error } = validateAndFixParams(toolName, tool, params);
+  if (error) return fail(error);
+
+  try {
+    const result = await withTimeout(tool.execute(fixedParams), 10_000, toolName);
+    return enrichWithGoalProgress(toolName, result);
+  } catch (e: any) {
+    if (e?.message?.includes('timed out')) {
+      return fail(`Tool ${toolName} timed out after 10s. Try again or simplify your request.`);
+    }
+    return fail(e?.message ?? `Tool ${toolName} failed unexpectedly.`);
+  }
 }

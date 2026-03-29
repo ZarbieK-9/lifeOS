@@ -7,6 +7,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import * as SecureStore from 'expo-secure-store';
 import { kv } from '../db/mmkv';
+import { saveGoogleOAuthState } from '../db/database';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -66,6 +67,45 @@ export const googleAuth = {
   /** Check if connected (sync, from MMKV) */
   isConnected: (): boolean => kv.getBool('google_connected'),
 
+  /**
+   * Restore connection state from stored tokens (e.g. on app start).
+   * If we have a refresh_token or valid access_token, set google_connected and email so the user stays logged in.
+   */
+  restoreConnection: async (): Promise<{ connected: boolean; email?: string | null }> => {
+    const token = await googleAuth.getAccessToken();
+    if (!token) {
+      // Preserve signed-in UX when we still have stored credentials.
+      // This avoids forcing re-auth on app restart during transient network issues.
+      const hasSession = await hasStoredGoogleSession();
+      if (!hasSession) {
+        kv.set('google_connected', false);
+        kv.delete('google_email');
+        try {
+          await saveGoogleOAuthState(false, null);
+        } catch (e) {
+          console.warn('[google-auth] Failed to persist disconnect to DB:', e);
+        }
+        return { connected: false };
+      }
+      kv.set('google_connected', true);
+      const cachedEmail = kv.getString('google_email') ?? null;
+      return { connected: true, email: cachedEmail };
+    }
+
+    kv.set('google_connected', true);
+    let email = kv.getString('google_email') ?? null;
+    if (!email) {
+      email = await fetchGoogleEmail(token);
+      if (email) kv.set('google_email', email);
+    }
+    try {
+      await saveGoogleOAuthState(true, email);
+    } catch (e) {
+      console.warn('[google-auth] Failed to persist to DB:', e);
+    }
+    return { connected: true, email };
+  },
+
   /** Get current access token with auto-refresh */
   getAccessToken: async (): Promise<string | null> => {
     const expiry = await SecureStore.getItemAsync(GOOGLE_TOKEN_EXPIRY_KEY);
@@ -96,7 +136,8 @@ export const googleAuth = {
       responseType: AuthSession.ResponseType.Code,
       extraParams: {
         access_type: 'offline',
-        prompt: 'consent',
+        prompt: 'select_account',
+        include_granted_scopes: 'true',
       },
     });
 
@@ -166,6 +207,11 @@ export const googleAuth = {
     await SecureStore.deleteItemAsync(GOOGLE_TOKEN_EXPIRY_KEY);
     kv.set('google_connected', false);
     kv.delete('google_email');
+    try {
+      await saveGoogleOAuthState(false, null);
+    } catch (e) {
+      console.warn('[google-auth] Failed to persist disconnect to DB:', e);
+    }
   },
 };
 
@@ -224,6 +270,11 @@ async function exchangeAndStore(
   const email = await fetchGoogleEmail(accessToken);
   kv.set('google_connected', true);
   if (email) kv.set('google_email', email);
+  try {
+    await saveGoogleOAuthState(true, email ?? null);
+  } catch (e) {
+    console.warn('[google-auth] Failed to persist to DB:', e);
+  }
   return { success: true, email: email ?? undefined };
 }
 
@@ -244,9 +295,14 @@ async function refreshToken(): Promise<string | null> {
     }
     return tokenResponse.accessToken;
   } catch {
-    kv.set('google_connected', false);
     return null;
   }
+}
+
+async function hasStoredGoogleSession(): Promise<boolean> {
+  const access = await SecureStore.getItemAsync(GOOGLE_ACCESS_TOKEN_KEY);
+  const refresh = await SecureStore.getItemAsync(GOOGLE_REFRESH_TOKEN_KEY);
+  return Boolean(access || refresh);
 }
 
 async function fetchGoogleEmail(accessToken: string): Promise<string | null> {

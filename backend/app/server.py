@@ -21,8 +21,11 @@ from app.services.ai_service import AiServicer
 from app.services.sync_service import SyncServicer
 from app.services.health_service import HealthServicer
 from app.services.automation_service import AutomationServicer, automation_cron_loop
+from app.services.coach_watcher_service import coach_cron_loop
 from app.services.apikey_service import ApiKeyServicer
 from app.services.webhook_service import WebhookServicer
+from app.services.coach_data_service import CoachDataServicer
+from app.services.push_notification_service import PushNotificationServicer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("lifeos")
@@ -160,6 +163,12 @@ async def serve():
     lifeos_pb2_grpc.add_WebhookServiceServicer_to_server(
         AuthServicerWrapper(WebhookServicer()), server
     )
+    lifeos_pb2_grpc.add_CoachDataServiceServicer_to_server(
+        AuthServicerWrapper(CoachDataServicer()), server
+    )
+    lifeos_pb2_grpc.add_PushNotificationServiceServicer_to_server(
+        AuthServicerWrapper(PushNotificationServicer()), server
+    )
 
     # Enable reflection for debugging with grpcurl
     from grpc_reflection.v1alpha import reflection
@@ -177,6 +186,8 @@ async def serve():
         lifeos_pb2.DESCRIPTOR.services_by_name["AutomationService"].full_name,
         lifeos_pb2.DESCRIPTOR.services_by_name["ApiKeyService"].full_name,
         lifeos_pb2.DESCRIPTOR.services_by_name["WebhookService"].full_name,
+        lifeos_pb2.DESCRIPTOR.services_by_name["CoachDataService"].full_name,
+        lifeos_pb2.DESCRIPTOR.services_by_name["PushNotificationService"].full_name,
         reflection.SERVICE_NAME,
     )
     reflection.enable_server_reflection(SERVICE_NAMES, server)
@@ -188,6 +199,7 @@ async def serve():
 
     # Start automation cron scheduler
     cron_task = asyncio.create_task(automation_cron_loop())
+    coach_task = asyncio.create_task(coach_cron_loop())
 
     # Graceful shutdown
     loop = asyncio.get_event_loop()
@@ -207,6 +219,14 @@ async def serve():
     await stop_event.wait()
     logger.info("Shutting down server...")
     cron_task.cancel()
+    coach_task.cancel()
+    for t in (cron_task, coach_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
     await server.stop(grace=5)
 
 

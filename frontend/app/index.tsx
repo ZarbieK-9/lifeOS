@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Image, InteractionManager, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useStore } from '@/src/store/useStore';
+import { kv } from '@/src/db/mmkv';
 import { useAppTheme } from '@/src/hooks/useAppTheme';
 import { Typography } from '@/constants/theme';
 
@@ -30,7 +31,8 @@ export default function BootstrapScreen() {
       setRedirected(true);
       try {
         if (isGoogleConnected) {
-          router.replace('/(tabs)');
+          const onboardingDone = kv.getString('onboarding_journey_done') === '1';
+          router.replace(onboardingDone ? '/(tabs)' : '/(auth)/journey');
         } else {
           router.replace('/(auth)/landing');
         }

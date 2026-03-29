@@ -6,6 +6,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useAppTheme } from '@/src/hooks/useAppTheme';
 import { getGoogleRedirectUri } from '@/src/services/google-auth';
 import { useStore } from '@/src/store/useStore';
+import { kv } from '@/src/db/mmkv';
 import { PrimaryButton } from '@/src/components/PrimaryButton';
 import { Spacing, Typography } from '@/constants/theme';
 
@@ -14,8 +15,15 @@ export default function LoginScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const setGoogleConnected = useStore((s) => s.setGoogleConnected);
+  const isGoogleConnected = useStore((s) => s.isGoogleConnected);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!isGoogleConnected) return;
+    const onboardingDone = kv.getString('onboarding_journey_done') === '1';
+    router.replace(onboardingDone ? '/(tabs)' : '/(auth)/journey');
+  }, [isGoogleConnected, router]);
 
   const onGoogleSignIn = async () => {
     const redirectUri = getGoogleRedirectUri();
@@ -37,7 +45,8 @@ export default function LoginScreen() {
         setGoogleConnected(true, result.email ?? null);
         InteractionManager.runAfterInteractions(() => {
           try {
-            router.replace('/(tabs)');
+            const onboardingDone = kv.getString('onboarding_journey_done') === '1';
+            router.replace(onboardingDone ? '/(tabs)' : '/(auth)/journey');
           } catch (_) {}
         });
       } else {

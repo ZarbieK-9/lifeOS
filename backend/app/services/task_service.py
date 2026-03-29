@@ -22,6 +22,7 @@ def _task_to_proto(t: Task) -> lifeos_pb2.Task:
         status=t.status or "pending",
         created_at=str(t.created_at) if t.created_at else "",
         updated_at=str(t.updated_at) if t.updated_at else "",
+        recurrence=t.recurrence or "",
     )
 
 
@@ -53,6 +54,7 @@ class TaskServicer(lifeos_pb2_grpc.TaskServiceServicer):
                 priority=request.priority or "medium",
                 notes=request.notes or "",
                 status=request.status or "pending",
+                recurrence=request.recurrence or None,
                 created_at=now,
                 updated_at=now,
             )
@@ -85,6 +87,8 @@ class TaskServicer(lifeos_pb2_grpc.TaskServiceServicer):
                 task.notes = request.notes
             if request.status:
                 task.status = request.status
+            if request.recurrence:
+                task.recurrence = request.recurrence
             task.updated_at = datetime.now(timezone.utc)
 
             await session.commit()

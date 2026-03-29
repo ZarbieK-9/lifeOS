@@ -26,11 +26,16 @@ export interface RoutingDecision {
   contextBudget: number | null;
   /** Include tools in prompt? */
   includeTools: boolean;
+  /** Direct deterministic tool dispatch for obvious intents (skip LLM). */
+  directTool?: { tool: string; params: Record<string, unknown>; reason: string };
 }
 
 // ── Pattern matchers ─────────────────────────────────
 
 const SYSTEM_PREFIX = /^\[SYSTEM:/;
+
+/** Goal-setting patterns — user wants to set a goal or commitment */
+const GOAL_PATTERNS = /\b(goal|target|aim|want to|help me|i want|i need to|commit to|challenge|let'?s)\b/i;
 
 /** Action verbs that require tool execution */
 const ACTION_PATTERNS = /\b(log|add|create|delete|remove|complete|done|start|stop|set|send|reply|edit|update|cancel|snooze|remind|block|schedule|track)\b/i;
@@ -69,14 +74,16 @@ const CONTEXT_EXPENSE = /\b(expense|spent|spend|cost|budget|money|price|pay|paid
  * Uses a weighted scoring system rather than simple keyword match.
  */
 export function routeIntent(input: string): RoutingDecision {
+  const directTool = detectDirectToolIntent(input);
   // System messages always get full treatment
   if (SYSTEM_PREFIX.test(input)) {
     return {
       intent: 'system',
       useHeavy: true,
       contextNeeds: { calendar: true, emails: true, tasks: true, notes: true, mood: true, expenses: true, full: true },
-      contextBudget: 3000,
+      contextBudget: 4500,
       includeTools: true,
+      directTool,
     };
   }
 
@@ -84,6 +91,9 @@ export function routeIntent(input: string): RoutingDecision {
   let actionScore = 0;
   let queryScore = 0;
   let chatScore = 0;
+
+  // Goal signals — goals are actions (need heavy model + tools)
+  if (GOAL_PATTERNS.test(input) && ACTION_NOUNS.test(input)) actionScore += 4;
 
   // Action signals
   if (ACTION_PATTERNS.test(input)) actionScore += 3;
@@ -140,8 +150,9 @@ export function routeIntent(input: string): RoutingDecision {
         intent,
         useHeavy: true,
         contextNeeds,
-        contextBudget: 3000,
+        contextBudget: 4500,
         includeTools: true,
+        directTool,
       };
 
     case 'query':
@@ -152,8 +163,9 @@ export function routeIntent(input: string): RoutingDecision {
         intent,
         useHeavy: needsReasoning,
         contextNeeds,
-        contextBudget: needsReasoning ? 3000 : 1500,
+        contextBudget: needsReasoning ? 4500 : 1500,
         includeTools: false,
+        directTool,
       };
 
     case 'chat':
@@ -164,6 +176,78 @@ export function routeIntent(input: string): RoutingDecision {
         contextNeeds: { calendar: false, emails: false, tasks: false, notes: false, mood: false, expenses: false, full: false },
         contextBudget: 1500,
         includeTools: false,
+        directTool,
       };
   }
+}
+
+/**
+ * Direct deterministic dispatch for obvious, unambiguous commands.
+ * Skips LLM entirely for instant execution. Returns undefined for
+ * anything ambiguous — the LLM handles those.
+ */
+function detectDirectToolIntent(inputRaw: string): RoutingDecision['directTool'] {
+  const input = inputRaw.trim();
+
+  // Skip compound requests — let LLM decompose them
+  if (input.length > 100 || /\b(and|also|then|&)\b/i.test(input)) return undefined;
+
+  const DIRECT_PATTERNS: Array<{
+    pattern: RegExp;
+    tool: string;
+    extract: (m: RegExpMatchArray) => Record<string, unknown>;
+    reason: string;
+  }> = [
+    {
+      pattern: /\b(?:log|drank|drink|had)\s+(\d{2,4})\s*ml\b/i,
+      tool: 'log_hydration',
+      extract: (m) => ({ amount_ml: parseInt(m[1], 10) }),
+      reason: 'explicit ml amount',
+    },
+    {
+      pattern: /^(\d{2,4})\s*ml\s*(?:water|of water)?\s*$/i,
+      tool: 'log_hydration',
+      extract: (m) => ({ amount_ml: parseInt(m[1], 10) }),
+      reason: 'standalone ml amount',
+    },
+    {
+      pattern: /\b(?:add|new|create)\s+task\s+(.{3,80})/i,
+      tool: 'add_task',
+      extract: (m) => ({ title: m[1].trim().replace(/[.!?]+$/, '') }),
+      reason: 'explicit add task',
+    },
+    {
+      pattern: /\b(?:complete|done|finish|mark\s+done)\s+(.{3,80})/i,
+      tool: 'complete_task',
+      extract: (m) => ({ title_match: m[1].trim().replace(/[.!?]+$/, '') }),
+      reason: 'explicit complete task',
+    },
+    {
+      pattern: /\b(?:start\s+)?focus\s+(\d{1,3})\s*(?:min(?:utes?)?)?/i,
+      tool: 'set_focus_mode',
+      extract: (m) => ({ enabled: true, durationMin: parseInt(m[1], 10) }),
+      reason: 'explicit focus duration',
+    },
+    {
+      pattern: /\b(?:log|start)\s+sleep\b|going\s+to\s+(?:bed|sleep)\b/i,
+      tool: 'log_sleep',
+      extract: () => ({ action: 'start' }),
+      reason: 'explicit sleep start',
+    },
+    {
+      pattern: /\bwoke\s+up\b|\bstop\s+sleep\b/i,
+      tool: 'log_sleep',
+      extract: () => ({ action: 'stop' }),
+      reason: 'explicit wake up',
+    },
+  ];
+
+  for (const { pattern, tool, extract, reason } of DIRECT_PATTERNS) {
+    const match = input.match(pattern);
+    if (match) {
+      return { tool, params: extract(match), reason };
+    }
+  }
+
+  return undefined;
 }

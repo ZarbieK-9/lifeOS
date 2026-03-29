@@ -89,7 +89,7 @@ export default function NotesScreen({ onOpenEditor }: { onOpenEditor: (noteId: s
   }, [theme, onOpenEditor]);
 
   return (
-    <SafeAreaView style={[ss.fill, { backgroundColor: theme.background }]} edges={['top', 'left', 'right']}>
+    <SafeAreaView style={[ss.fill, { backgroundColor: theme.background }]} edges={['top', 'left', 'right', 'bottom']}>
       {/* Search bar */}
       <View style={[ss.searchRow, { borderBottomColor: theme.border }]}>
         <TextInput

@@ -1,9 +1,10 @@
 // AI chat — PicoClaw with gradient, avatars, correct message order, keyboard-aware
 
 import { PressableScale } from "@/components/PressableScale";
-import { CALM, Spacing, Typography } from "@/constants/theme";
+import { CALM, Typography } from "@/constants/theme";
 import dayjs from "dayjs";
 import * as Clipboard from "expo-clipboard";
+import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -27,7 +28,7 @@ import {
   SafeAreaView,
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
-import { run, cleanOutput } from "../agent/agent";
+import { run, runVoiceCommand, cleanOutput } from "../agent/agent";
 import MarkdownOutput from "../components/MarkdownOutput";
 import VoiceInput, { type VoiceInputHandle } from "../components/VoiceInput";
 import { useAppTheme } from "../hooks/useAppTheme";
@@ -113,7 +114,6 @@ export default function AiScreen() {
   const addCmd = useStore((s) => s.addAiCommand);
   const resolveCmd = useStore((s) => s.resolveAiCommand);
   const init = useStore((s) => s.init);
-  const isAuthenticated = useStore((s) => s.isAuthenticated);
   const routines = useStore((s) => s.routines);
   const llmFastModelStatus = useStore((s) => s.llmFastModelStatus);
   const llmFastDownloadProgress = useStore((s) => s.llmFastDownloadProgress);
@@ -125,7 +125,10 @@ export default function AiScreen() {
   const addChatSession = useStore((s) => s.addChatSession);
   const setCurrentChat = useStore((s) => s.setCurrentChat);
   const loadChatSessions = useStore((s) => s.loadChatSessions);
-  const deleteChatSession = useStore((s) => s.deleteChatSession);
+
+  // Agentic system
+  const watcherQueueCount = useStore((s) => s.watcherQueue.filter(n => !n.read).length);
+  const activeGoalCount = useStore((s) => s.goals.filter(g => g.status === 'active').length);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -136,6 +139,8 @@ export default function AiScreen() {
 
   const [input, setInput] = useState("");
   const [voiceMode, setVoiceMode] = useState(false);
+  const voiceInFlightRef = useRef(false);
+  const lastVoiceSendRef = useRef<{ text: string; ts: number }>({ text: '', ts: 0 });
   const listRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
   const voiceRef = useRef<VoiceInputHandle>(null);
@@ -181,13 +186,11 @@ export default function AiScreen() {
       console.timeEnd(`${sendTag} addCmd`);
 
       try {
-        const useOnline = isAuthenticated && isOnline;
-        console.log(`${sendTag} calling run() — online=${useOnline}`);
+        console.log(`${sendTag} calling run()`);
         console.time(`${sendTag} run()`);
-        const response = await run(text, routines, {
-          online: useOnline,
-          cmdId,
-        });
+        const response = speakResponse
+          ? await runVoiceCommand(text, { cmdId, handsFree: true })
+          : await run(text, routines, { cmdId });
         console.timeEnd(`${sendTag} run()`);
 
         haptic.success();
@@ -213,7 +216,7 @@ export default function AiScreen() {
         if (speakResponse) setVoiceMode(false);
       }
     },
-    [input, isOnline, isAuthenticated, routines, addCmd, resolveCmd, haptic, tts],
+    [input, routines, addCmd, resolveCmd, haptic, tts],
   );
 
   const onCopySuggestedReply = useCallback(
@@ -240,8 +243,21 @@ export default function AiScreen() {
   // Voice conversation mode: auto-send transcribed text and speak the response
   const onVoiceAutoSend = useCallback(
     (text: string) => {
+      const normalized = text.trim().toLowerCase();
+      const now = Date.now();
+      if (!normalized) return;
+      if (
+        voiceInFlightRef.current ||
+        (normalized === lastVoiceSendRef.current.text && now - lastVoiceSendRef.current.ts < 2200)
+      ) {
+        return;
+      }
+      lastVoiceSendRef.current = { text: normalized, ts: now };
+      voiceInFlightRef.current = true;
       setVoiceMode(true);
-      onSend(text, true); // true = speak response after
+      Promise.resolve(onSend(text, true)).finally(() => {
+        voiceInFlightRef.current = false;
+      });
     },
     [onSend],
   );
@@ -262,11 +278,7 @@ export default function AiScreen() {
     async (cmd: AiCommand) => {
       haptic.light();
       try {
-        const useOnline = isAuthenticated && isOnline;
-        const response = await run(cmd.input, routines, {
-          online: useOnline,
-          cmdId: cmd.id,
-        });
+        const response = await run(cmd.input, routines, { cmdId: cmd.id });
         haptic.success();
         await resolveCmd(cmd.id, response.output, "executed");
       } catch (e) {
@@ -277,7 +289,7 @@ export default function AiScreen() {
         );
       }
     },
-    [isOnline, isAuthenticated, routines, resolveCmd, haptic],
+    [routines, resolveCmd, haptic],
   );
 
   const onSuggestionChip = useCallback(
@@ -335,16 +347,24 @@ export default function AiScreen() {
           {proactive && (
             <View style={ss.aiRow}>
               <Image source={LOGO_IMAGE} style={ss.avatarImage} resizeMode="cover" />
-              <View style={[ss.aiBubble, { backgroundColor: isDark ? calm.tealBg : "#e8ecea" }]}>
-                {proactiveLabel(item.source) && (
-                  <Text style={[ss.proactiveTagText, { color: calm.coral }]}>
-                    {proactiveLabel(item.source)}
+              <View style={ss.glassFrame}>
+                <BlurView intensity={28} tint={isDark ? 'dark' : 'light'} style={StyleSheet.absoluteFillObject} />
+                <LinearGradient
+                  colors={isDark ? ([calm.tealBg, calm.tealSoft] as const) : (["#FFF8F2", "#F2FBF3"] as const)}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={ss.aiBubble}
+                >
+                  {proactiveLabel(item.source) && (
+                    <Text style={[ss.proactiveTagText, { color: calm.coral }]}>
+                      {proactiveLabel(item.source)}
+                    </Text>
+                  )}
+                  <Text style={[ss.aiBubbleText, { color: calm.text }]}>{item.input}</Text>
+                  <Text style={[ss.timeInline, { color: calm.textSecondary }]}>
+                    {dayjs(item.created_at).format("HH:mm")}
                   </Text>
-                )}
-                <Text style={[ss.aiBubbleText, { color: calm.text }]}>{item.input}</Text>
-                <Text style={[ss.timeInline, { color: calm.textSecondary }]}>
-                  {dayjs(item.created_at).format("HH:mm")}
-                </Text>
+                </LinearGradient>
               </View>
             </View>
           )}
@@ -361,7 +381,14 @@ export default function AiScreen() {
                   <Text style={[ss.timeInline, { color: calm.textSecondary }]}>{dayjs(item.created_at).format("HH:mm")}</Text>
                 </View>
               ) : isPending ? (
-                <View style={[ss.aiBubble, { backgroundColor: isDark ? calm.tealBg : "#e8ecea" }]}>
+                <View style={ss.glassFrame}>
+                  <BlurView intensity={28} tint={isDark ? 'dark' : 'light'} style={StyleSheet.absoluteFillObject} />
+                  <LinearGradient
+                    colors={isDark ? ([calm.tealBg, calm.tealSoft] as const) : (["#FFF8F2", "#F2FBF3"] as const)}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={ss.aiBubble}
+                  >
                   {llmStreamingText ? (
                     <Text style={[ss.aiBubbleText, { color: calm.text }]}>
                       {llmStreamingText}
@@ -371,9 +398,17 @@ export default function AiScreen() {
                     <PendingDots />
                   )}
                   <Text style={[ss.timeInline, { color: calm.textSecondary }]}>{dayjs(item.created_at).format("HH:mm")}</Text>
+                  </LinearGradient>
                 </View>
               ) : displayOutput ? (
-                <View style={[ss.aiBubble, { backgroundColor: isDark ? calm.tealBg : "#e8ecea" }]}>
+                <View style={ss.glassFrame}>
+                  <BlurView intensity={28} tint={isDark ? 'dark' : 'light'} style={StyleSheet.absoluteFillObject} />
+                  <LinearGradient
+                    colors={isDark ? ([calm.tealBg, calm.tealSoft] as const) : (["#FFF8F2", "#F2FBF3"] as const)}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={ss.aiBubble}
+                  >
                   <MarkdownOutput
                     theme={{
                       text: calm.text,
@@ -396,6 +431,7 @@ export default function AiScreen() {
                     </View>
                   )}
                   <Text style={[ss.timeInline, { color: calm.textSecondary }]}>{dayjs(item.created_at).format("HH:mm")}</Text>
+                  </LinearGradient>
                 </View>
               ) : null}
             </View>
@@ -403,20 +439,20 @@ export default function AiScreen() {
         </View>
       );
     },
-    [listData, calm, onCopySuggestedReply, onAddAsTask, onRetry, llmStreamingText],
+    [listData, calm, onCopySuggestedReply, onAddAsTask, onRetry, llmStreamingText, isDark],
   );
 
   const emptyState = (
     <View style={ss.empty}>
       <Text style={[ss.emptyGreeting, { color: calm.text }]}>
-        Hey! I'm PicoClaw
+        Hey! I&apos;m PicoClaw
       </Text>
       <Text style={[ss.emptySub, { color: calm.textSecondary }]}>
         I can manage tasks, track health, and organize your day.
       </Text>
       {Platform.OS === "android" && notificationListenerEnabled && (
         <Text style={[ss.emptySub, { color: calm.textSecondary, fontSize: 13, marginBottom: 12 }]}>
-          When you get a message from WhatsApp or other apps, I'll suggest a reply here and send you a notification.
+          When you get a message from WhatsApp or other apps, I&apos;ll suggest a reply here and send you a notification.
         </Text>
       )}
       <View style={ss.chipRow}>
@@ -501,7 +537,12 @@ export default function AiScreen() {
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={keyboardOffset}
       >
-          <View style={[ss.header, { borderBottomColor: theme.border, backgroundColor: theme.surface }]}>
+          <LinearGradient
+            colors={[theme.surface, theme.surfaceMuted] as const}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[ss.header, { borderBottomColor: theme.border }]}
+          >
             <Pressable onPress={() => { haptic.light(); openDrawer(); }} style={ss.headerSide}>
               <MaterialIcons name="menu" size={24} color={calm.text} />
             </Pressable>
@@ -523,7 +564,7 @@ export default function AiScreen() {
             >
               <MaterialIcons name="add" size={26} color={calm.teal} />
             </Pressable>
-          </View>
+          </LinearGradient>
 
           {/* Animated chat history drawer */}
           {sidebarOpen && (
@@ -624,6 +665,22 @@ export default function AiScreen() {
             keyboardShouldPersistTaps="handled"
           />
 
+          {/* Agent status chips */}
+          {(watcherQueueCount > 0 || activeGoalCount > 0) && (
+            <View style={{ flexDirection: 'row', paddingHorizontal: 16, paddingVertical: 4, gap: 8, backgroundColor: theme.surfaceElevated, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.border }}>
+              {watcherQueueCount > 0 && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: theme.warnBg, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12 }}>
+                  <Text style={{ color: theme.warn, fontSize: 11, fontWeight: '600' }}>{watcherQueueCount} insight{watcherQueueCount > 1 ? 's' : ''}</Text>
+                </View>
+              )}
+              {activeGoalCount > 0 && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: theme.successBg, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12 }}>
+                  <Text style={{ color: theme.success, fontSize: 11, fontWeight: '600' }}>{activeGoalCount} goal{activeGoalCount > 1 ? 's' : ''} active</Text>
+                </View>
+              )}
+            </View>
+          )}
+
           <View
             style={[
               ss.inputBar,
@@ -685,6 +742,7 @@ const ss = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
   },
   headerSide: { width: 44, height: 44, justifyContent: "center", alignItems: "center" },
   headerCenter: {
@@ -770,20 +828,27 @@ const ss = StyleSheet.create({
     maxWidth: "85%",
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderRadius: 18,
-    borderBottomRightRadius: 4,
+    borderRadius: 24,
+    borderBottomRightRadius: 10,
   },
   userBubbleText: { color: "#fff", fontSize: 16, lineHeight: 22 },
   aiBubble: {
     flex: 1,
-    maxWidth: "85%",
-    marginLeft: 10,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderRadius: 18,
-    borderBottomLeftRadius: 4,
+    borderRadius: 24,
+    borderBottomLeftRadius: 10,
   },
   aiBubbleText: { fontSize: 16, lineHeight: 24 },
+  glassFrame: {
+    flex: 1,
+    maxWidth: "85%",
+    marginLeft: 10,
+    borderRadius: 24,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.25)",
+  },
   avatarWrap: {
     width: 36,
     height: 36,

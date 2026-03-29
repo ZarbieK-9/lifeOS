@@ -1,50 +1,47 @@
-# Welcome to your Expo app 👋
+# LifeOS
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Offline-first AI life management: **Expo / React Native** (`frontend/`) and **Python gRPC** backend (`backend/`) with PostgreSQL.
 
-## Get started
-
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Frontend
 
 ```bash
-npm run reset-project
+cd frontend
+npm ci
+npm run start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Backend
 
-## Learn more
+```bash
+cd backend
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/alembic upgrade head
+.venv/bin/python -m app.server
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+`DATABASE_URL` (e.g. `postgresql+asyncpg://...`) and `JWT_SECRET` via environment or `.env`. See `backend/app/config.py`.
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+### Proto / gRPC
 
-## Join the community
+After changing `backend/proto/lifeos.proto`, regenerate stubs and the Envoy JSON descriptor:
 
-Join our community of developers creating universal apps.
+```bash
+cd backend
+./generate.sh
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+`backend/proto.pb` is produced next to `backend/envoy.yaml` for gRPC–JSON transcoding. Validate tracked stubs:
+
+```bash
+cd backend
+./check_generated.sh
+```
+
+### Deploy (GitHub Actions)
+
+Push to `main` runs `.github/workflows/deploy.yml` (SSH to your server). Configure repository secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`. On the host, the repo is updated and `backend/scripts/deploy.sh` runs (venv, generate, Alembic, PM2).
+
+## Hey Zarbie (Android)
+
+Dev build with `frontend/plugins/withHeyZarbieAndroid.js`. See `frontend/docs/heyzarbie-android-validation.md`.

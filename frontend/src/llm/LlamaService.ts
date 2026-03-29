@@ -3,8 +3,9 @@
 
 import type { LlamaContext } from 'llama.rn';
 import { buildToolDefinitions, buildFilteredToolDefinitions, buildSystemPrompt, buildFastSystemPrompt } from './prompt';
-import { toolRegistry } from '../agent/tools';
+import { toolRegistry, executeToolWithGoalContext } from '../agent/tools';
 import type { MatchedIntent, ToolResult } from '../agent/types';
+import { withTimeout } from '../utils/timeout';
 
 /**
  * Cached require of llama.rn — avoids Metro re-bundling on every call.
@@ -32,7 +33,7 @@ async function safeInitLlama(params: any): Promise<LlamaContext> {
 }
 
 const HEAVY_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_TURNS = 3;
+const MAX_TURNS = 5;
 
 export interface CompletionResult {
   message: string;
@@ -178,19 +179,23 @@ class LlamaServiceImpl {
     const safeInput = sanitizeForLlama(userInput);
 
     try {
-      const result = await this.fastCtx.completion(
-        {
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: safeInput },
-          ] as any,
-          n_predict: 512,
-          temperature: 0.4,
-          stop: ['<|endoftext|>', '<|im_end|>'],
-        },
-        (data: any) => {
-          if (data?.token && callbacks?.onToken) callbacks.onToken(data.token);
-        },
+      const result = await withTimeout(
+        this.fastCtx.completion(
+          {
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: safeInput },
+            ] as any,
+            n_predict: 512,
+            temperature: 0.4,
+            stop: ['<|endoftext|>', '<|im_end|>'],
+          },
+          (data: any) => {
+            if (data?.token && callbacks?.onToken) callbacks.onToken(data.token);
+          },
+        ),
+        30_000,
+        'Fast LLM',
       );
 
       const text = (result?.text ?? '').trim();
@@ -243,19 +248,34 @@ class LlamaServiceImpl {
    * 1. Send user input + tools to LLM
    * 2. If LLM calls tools → execute → feed results back → repeat (max 3 turns)
    * 3. Return final text + all intents/results
+   * @param options.includeTools - When false, no tools are sent (avoids parse errors for query-only prompts like meal plan).
    */
   async complete(
     userInput: string,
     contextJson: string,
     callbacks?: StreamCallbacks,
+    options?: { includeTools?: boolean },
   ): Promise<CompletionResult> {
     if (!this.heavyCtx) throw new Error('Heavy model not loaded');
     this.resetHeavyIdle();
 
   const safeContext = sanitizeForLlama(contextJson, 3000);
   const safeInput = sanitizeForLlama(userInput);
-  const systemPrompt = buildSystemPrompt(safeContext);
-  const tools = buildFilteredToolDefinitions(safeInput);
+  let systemPrompt = buildSystemPrompt(safeContext, safeInput);
+  const includeTools = options?.includeTools !== false;
+  const tools = includeTools ? buildFilteredToolDefinitions(safeInput) : [];
+
+  // Token budget check — estimate if total exceeds model's context (4096 tokens)
+  // Reserve ~600 tokens for generation. 1 token ≈ 4 chars.
+  const MAX_INPUT_TOKENS = 3500;
+  const totalChars = systemPrompt.length + safeInput.length + (tools.length > 0 ? JSON.stringify(tools).length : 0);
+  const estimatedTokens = Math.ceil(totalChars / 4);
+  if (estimatedTokens > MAX_INPUT_TOKENS) {
+    console.warn(`[LlamaService] Token budget exceeded: ~${estimatedTokens} tokens. Reducing context.`);
+    // Re-build with tighter context budget
+    const reducedContext = sanitizeForLlama(contextJson, 1500);
+    systemPrompt = buildSystemPrompt(reducedContext, safeInput);
+  }
 
   const messages: Message[] = [
     { role: 'system', content: systemPrompt },
@@ -270,18 +290,22 @@ class LlamaServiceImpl {
       callbacks?.onTurnStart?.(turn);
 
       try {
-        var result = await this.heavyCtx.completion(
-          {
-            messages: messages as any,
-            tools: tools as any,
-            tool_choice: 'auto',
-            n_predict: 1024,
-            temperature: 0.3,
-            stop: ['<|endoftext|>', '<|im_end|>'],
-          },
-          (data: any) => {
-            if (data?.token && callbacks?.onToken) callbacks.onToken(data.token);
-          },
+        var result = await withTimeout(
+          this.heavyCtx.completion(
+            {
+              messages: messages as any,
+              tools: tools as any,
+              tool_choice: includeTools ? 'auto' : 'none',
+              n_predict: 1024,
+              temperature: 0.3,
+              stop: ['<|endoftext|>', '<|im_end|>'],
+            },
+            (data: any) => {
+              if (data?.token && callbacks?.onToken) callbacks.onToken(data.token);
+            },
+          ),
+          60_000,
+          'Heavy LLM',
         );
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -297,7 +321,7 @@ class LlamaServiceImpl {
               {
                 messages: messages as any,
                 tools: tools as any,
-                tool_choice: 'auto',
+                tool_choice: includeTools ? 'auto' : 'none',
                 n_predict: 512,
                 temperature: 0.3,
                 stop: ['<|endoftext|>', '<|im_end|>'],
@@ -314,7 +338,13 @@ class LlamaServiceImpl {
               results: allResults,
             };
           }
-        } else if (msg.includes('HostFunction') || msg.includes('Exception') || msg.toLowerCase().includes('context is full')) {
+        } else if (
+          msg.includes('HostFunction') ||
+          msg.includes('Exception') ||
+          msg.toLowerCase().includes('context is full') ||
+          msg.includes('failed to parse') ||
+          msg.includes('type must be string')
+        ) {
           console.warn('[LlamaService] Native completion failed (heavy):', msg);
           return {
             message: `Something went wrong on my side. Try a shorter message or ask again in a moment.`,
@@ -327,34 +357,42 @@ class LlamaServiceImpl {
       }
 
       const text = (result.text ?? '').trim();
+      const rawToolCalls = (result as any).tool_calls ?? [];
+      // Normalize so native layer never sees null type/name/arguments (avoids "type must be string but is null")
       const toolCalls: Array<{
         id: string;
+        type: 'function';
         function: { name: string; arguments: string };
-      }> = (result as any).tool_calls ?? [];
+      }> = rawToolCalls
+        .filter((tc: any) => tc && (tc.function?.name || tc.name))
+        .map((tc: any) => ({
+          id: typeof tc.id === 'string' ? tc.id : `tc-${turn}-${Math.random().toString(36).slice(2, 9)}`,
+          type: 'function' as const,
+          function: {
+            name: typeof tc.function?.name === 'string' ? tc.function.name : (tc.name ?? 'unknown'),
+            arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : (tc.arguments ?? '{}'),
+          },
+        }));
 
       console.log(`[LlamaService] turn ${turn + 1} — text length=${text.length}, tool_calls=${toolCalls.length}`, text ? `"${text.slice(0, 120)}${text.length > 120 ? '…' : ''}"` : '(empty)');
 
       // If model called tools, execute them and loop
       if (toolCalls.length > 0) {
-        messages.push({ role: 'assistant', content: text, tool_calls: toolCalls });
+        messages.push({ role: 'assistant', content: text || ' ', tool_calls: toolCalls });
 
         for (const tc of toolCalls) {
           const toolName = tc.function.name;
           const tool = toolRegistry.get(toolName);
           let toolResult: ToolResult;
 
-          if (!tool) {
-            toolResult = { success: false, message: `Unknown tool: ${toolName}` };
-          } else {
-            try {
-              const params = JSON.parse(tc.function.arguments || '{}');
-              toolResult = await tool.execute(params);
-            } catch (e) {
-              toolResult = {
-                success: false,
-                message: `Error: ${e instanceof Error ? e.message : String(e)}`,
-              };
-            }
+          try {
+            const params = JSON.parse(tc.function.arguments || '{}');
+            toolResult = await executeToolWithGoalContext(toolName, params);
+          } catch (e) {
+            toolResult = {
+              success: false,
+              message: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            };
           }
 
           allIntents.push({
@@ -370,6 +408,8 @@ class LlamaServiceImpl {
               success: toolResult.success,
               message: toolResult.message,
               data: toolResult.data,
+              // Hint to LLM on failure: retry with different params or explain to user
+              ...(toolResult.success ? {} : { hint: 'Tool failed. Try different parameters or explain the issue to the user.' }),
             }),
             tool_call_id: tc.id,
           });
@@ -382,15 +422,25 @@ class LlamaServiceImpl {
       break;
     }
 
-    // Fallback if we exhausted turns without final text
+    // Fallback if we exhausted turns without final text — synthesize from tool results
     if (!finalMessage && allResults.length > 0) {
-      finalMessage = allResults.map((r) => r.message).join('\n');
+      const successes = allResults.filter((r) => r.success);
+      const failures = allResults.filter((r) => !r.success);
+      const parts: string[] = [];
+      if (successes.length > 0) parts.push(successes.map((r) => r.message).join('. '));
+      if (failures.length > 0) parts.push(`Couldn't do: ${failures.map((r) => r.message).join(', ')}`);
+      finalMessage = parts.join('\n\n');
     }
 
-    // If model returned a placeholder (e.g. "hold a moment") but we have tool results, use synthesized answer from results
+    // If model returned a placeholder (e.g. "hold a moment") but we have tool results, synthesize
     if (finalMessage && allResults.length > 0 && looksLikePlaceholder(finalMessage)) {
       console.log('[LlamaService] final text looks like placeholder; synthesizing from tool results');
-      finalMessage = allResults.map((r) => r.message).filter(Boolean).join('\n\n');
+      const successes = allResults.filter((r) => r.success);
+      const failures = allResults.filter((r) => !r.success);
+      const parts: string[] = [];
+      if (successes.length > 0) parts.push(successes.map((r) => r.message).join('. '));
+      if (failures.length > 0) parts.push(`Couldn't do: ${failures.map((r) => r.message).join(', ')}`);
+      finalMessage = parts.join('\n\n');
     }
 
     const output = finalMessage || `Understood: "${userInput}"`;
@@ -401,6 +451,33 @@ class LlamaServiceImpl {
       intents: allIntents,
       results: allResults,
     };
+  }
+
+  /**
+   * Single-turn text-only completion with the heavy model (no tools).
+   * Use for structured output like routine JSON. Heavy model must already be loaded.
+   */
+  async completeHeavyTextOnly(userPrompt: string, systemPrompt: string): Promise<string> {
+    if (!this.heavyCtx) throw new Error('Heavy model not loaded');
+    this.resetHeavyIdle();
+
+    const safeUser = sanitizeForLlama(userPrompt, 1500);
+    const safeSystem = sanitizeForLlama(systemPrompt, 2000);
+
+    const result = await this.heavyCtx.completion(
+      {
+        messages: [
+          { role: 'system', content: safeSystem },
+          { role: 'user', content: safeUser },
+        ] as any,
+        n_predict: 512,
+        temperature: 0.2,
+        stop: ['<|endoftext|>', '<|im_end|>'],
+      },
+      () => {},
+    );
+
+    return (result?.text ?? '').trim();
   }
 
   // ── Heavy idle timeout ──

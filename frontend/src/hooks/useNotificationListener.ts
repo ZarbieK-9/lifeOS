@@ -267,7 +267,7 @@ export function useNotificationListener() {
 }
 
 async function fireNotificationAlert(detail: string, label: string): Promise<void> {
-  const { runProactive, cleanOutput } = await import('../agent/agent');
+  const { runProactive, cleanOutput, generateSuggestedReply } = await import('../agent/agent');
   const { extractSuggestedReply } = await import('../utils/suggestedReply');
   const store = useStore.getState();
   const cmdId = await store.addAiCommand(`[${label}]`, 'notification_alert');
@@ -276,7 +276,10 @@ async function fireNotificationAlert(detail: string, label: string): Promise<voi
   const cleaned = cleanOutput(response.output);
   await store.resolveAiCommand(cmdId, cleaned, 'executed');
 
-  const suggestedReply = extractSuggestedReply(cleaned);
+  let suggestedReply = extractSuggestedReply(cleaned);
+  if (!suggestedReply && detail) {
+    suggestedReply = await generateSuggestedReply(detail) ?? undefined;
+  }
   const { sendProactiveNotification } = await import('../services/notifications');
   await sendProactiveNotification(label, cleaned, 'app_notifications', suggestedReply ? { suggestedReply } : undefined);
 }

@@ -3,16 +3,17 @@
 
 set -e
 
-PROTO_DIR="$(cd "$(dirname "$0")" && pwd)/proto"
-OUT_DIR="$(cd "$(dirname "$0")" && pwd)/gen"
-ENVOY_DIR="$(cd "$(dirname "$0")/.." && pwd)/infra/envoy"
+BACKEND="$(cd "$(dirname "$0")" && pwd)"
+PROTO_DIR="$BACKEND/proto"
+OUT_DIR="$BACKEND/gen"
+DESCRIPTOR="$BACKEND/proto.pb"
 
 echo "Generating Python gRPC stubs..."
 python -m grpc_tools.protoc \
   -I"$PROTO_DIR" \
   --python_out="$OUT_DIR" \
   --grpc_python_out="$OUT_DIR" \
-  --descriptor_set_out="$ENVOY_DIR/proto.pb" \
+  --descriptor_set_out="$DESCRIPTOR" \
   --include_imports \
   lifeos.proto
 
@@ -22,9 +23,6 @@ if [ -f "$OUT_DIR/lifeos_pb2_grpc.py" ]; then
   echo "Fixed imports in lifeos_pb2_grpc.py"
 fi
 
-# Copy descriptor next to backend envoy.yaml (PM2 / self-hosted uses cwd backend/)
-cp -f "$ENVOY_DIR/proto.pb" "$(cd "$(dirname "$0")" && pwd)/proto.pb"
-
 echo "Proto generation complete."
 echo "  Python stubs: $OUT_DIR/lifeos_pb2.py, $OUT_DIR/lifeos_pb2_grpc.py"
-echo "  Envoy descriptor: $ENVOY_DIR/proto.pb + backend/proto.pb"
+echo "  Envoy descriptor: $DESCRIPTOR"

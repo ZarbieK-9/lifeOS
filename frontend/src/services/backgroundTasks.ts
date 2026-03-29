@@ -1,5 +1,6 @@
-// Background tasks — teaser notifications when app is closed
-// Full AI pipeline requires foreground; background only sends lightweight nudges.
+// Background tasks — lightweight watcher evaluation when app is closed.
+// Runs anomaly detection + high-priority rules without loading LLM.
+// Sends push notifications for actionable insights.
 
 import * as TaskManager from 'expo-task-manager';
 import * as BackgroundTask from 'expo-background-task';
@@ -13,59 +14,84 @@ TaskManager.defineTask(BACKGROUND_TASK_NAME, async () => {
     const enabled = kv.getBool('proactive_ai_enabled') ?? true;
     if (!enabled) return BackgroundTask.BackgroundTaskResult.Failed;
 
-    const hour = dayjs().hour();
-    const today = dayjs().format('YYYY-MM-DD');
-    const { sendProactiveNotification } = await import('./notifications');
-
-    // Morning teaser (5-10am)
-    const morningFired = kv.getString('proactive_last_morning');
-    const morningDone = morningFired && dayjs(morningFired).isSame(dayjs(), 'day');
-    if (hour >= 5 && hour < 10 && !morningDone) {
-      kv.set(`proactive_morning_${today}`, '1');
-      await sendProactiveNotification(
-        'Good Morning!',
-        'Your daily briefing is ready — tap to see it'
-      );
-      return BackgroundTask.BackgroundTaskResult.Success;
+    // Best effort queue drain to reduce server-state lag while app stays backgrounded.
+    try {
+      const { useStore } = await import('../store/useStore');
+      await useStore.getState().drainQueue();
+    } catch {
+      /* ignore */
     }
 
-    // Midday hydration nudge (11am-3pm, once per day)
-    const hydrationNudgeKey = `bg_hydration_nudge_${today}`;
-    if (hour >= 11 && hour < 15 && !kv.getString(hydrationNudgeKey)) {
-      const hydrationToday = kv.getNumber('hydration_today') ?? 0;
-      const goal = kv.getNumber('hydration_goal_ml') ?? 2500;
-      if (hydrationToday < goal * 0.5) {
-        kv.set(hydrationNudgeKey, '1');
-        const remaining = goal - hydrationToday;
-        await sendProactiveNotification(
-          'Hydration Reminder',
-          `You've had ${hydrationToday}ml so far — ${remaining}ml to go!`
-        );
+    const hour = dayjs().hour();
+    const quietAfter = kv.getNumber('proactive_quiet_after_hour') ?? 21;
+    const quietBefore = kv.getNumber('proactive_quiet_before_hour') ?? 7;
+
+    // Coach-aligned morning / evening / weekly (same copy as watcher) — run first; may use quiet hours for evening/weekly
+    try {
+      const { runCoachAlignedBackgroundNotifications } = await import('./coachBackgroundNotifications');
+      const sentCoach = await runCoachAlignedBackgroundNotifications();
+      if (sentCoach) {
         return BackgroundTask.BackgroundTaskResult.Success;
       }
+    } catch (e) {
+      console.warn('[BackgroundTask] coach-aligned:', e);
     }
 
-    // Afternoon task nudge (2-5pm, once per day)
-    const taskNudgeKey = `bg_task_nudge_${today}`;
-    if (hour >= 14 && hour < 17 && !kv.getString(taskNudgeKey)) {
-      kv.set(taskNudgeKey, '1');
-      await sendProactiveNotification(
-        'Task Check-in',
-        'How are your tasks going? Tap to review what\'s left today'
-      );
+    try {
+      const { runDayProfileLateNudge } = await import('./dayProfileNotifications');
+      if (await runDayProfileLateNudge()) {
+        return BackgroundTask.BackgroundTaskResult.Success;
+      }
+    } catch (e) {
+      console.warn('[BackgroundTask] day-profile:', e);
+    }
+
+    // Respect quiet hours for generic anomaly / hydration fallbacks
+    if (hour >= quietAfter || hour < quietBefore) {
       return BackgroundTask.BackgroundTaskResult.Success;
     }
 
-    // Evening teaser (7-11pm)
-    const eveningFired = kv.getString('proactive_last_evening');
-    const eveningDone = eveningFired && dayjs(eveningFired).isSame(dayjs(), 'day');
-    if (hour >= 19 && hour < 23 && !eveningDone) {
-      kv.set(`proactive_evening_${today}`, '1');
-      await sendProactiveNotification(
-        'Evening Reflection',
-        'Ready to review your day? Tap to see your summary'
-      );
-      return BackgroundTask.BackgroundTaskResult.Success;
+    const { sendProactiveNotification } = await import('./notifications');
+    const today = dayjs().format('YYYY-MM-DD');
+
+    // Try lightweight watcher evaluation (anomaly detection + state checks)
+    try {
+      const { detectAnomalies } = await import('../agent/patterns');
+      const anomalies = await detectAnomalies();
+
+      for (const anomaly of anomalies) {
+        if (anomaly.severity !== 'high') continue;
+
+        // Deduplicate — only send once per anomaly type per day
+        const dedupeKey = `bg_anomaly_${anomaly.description}_${today}`;
+        if (kv.getString(dedupeKey)) continue;
+        kv.set(dedupeKey, '1');
+
+        const titles: Record<string, string> = {
+          hydration_behind_pace: 'Behind on water',
+          past_usual_bedtime: 'Past your bedtime',
+          overdue_tasks: 'Overdue tasks',
+          unusual_spending: 'Unusual spending',
+        };
+        const title = titles[anomaly.description] ?? anomaly.description.replace(/_/g, ' ');
+        const body = formatAnomalyForNotification(anomaly);
+
+        await sendProactiveNotification(title, body);
+        return BackgroundTask.BackgroundTaskResult.Success;
+      }
+    } catch {
+      // Anomaly detection failed (DB not ready, etc.) — fall back to basic nudges
+    }
+
+    const hydrationKey = `bg_hydration_${today}`;
+    if (hour >= 11 && hour < 15 && !kv.getString(hydrationKey)) {
+      const todayMl = kv.getNumber('hydration_today') ?? 0;
+      const goal = kv.getNumber('hydration_goal_ml') ?? 2500;
+      if (todayMl < goal * 0.5) {
+        kv.set(hydrationKey, '1');
+        await sendProactiveNotification('Hydration Reminder', `${todayMl}ml so far — ${goal - todayMl}ml to go!`);
+        return BackgroundTask.BackgroundTaskResult.Success;
+      }
     }
 
     return BackgroundTask.BackgroundTaskResult.Success;
@@ -75,10 +101,21 @@ TaskManager.defineTask(BACKGROUND_TASK_NAME, async () => {
   }
 });
 
-/**
- * Register the background task.
- * Should be called once during app initialization.
- */
+function formatAnomalyForNotification(anomaly: { description: string; data: Record<string, unknown> }): string {
+  switch (anomaly.description) {
+    case 'hydration_behind_pace':
+      return `${anomaly.data.todayMl}ml so far, should be ~${anomaly.data.expectedMl}ml. Time to catch up!`;
+    case 'overdue_tasks': {
+      const titles = (anomaly.data.titles as string[]) ?? [];
+      return titles.length > 0 ? `${titles.join(', ')} — overdue` : `${anomaly.data.count} tasks overdue`;
+    }
+    case 'unusual_spending':
+      return `$${(anomaly.data.todaySpend as number).toFixed(2)} today — ${anomaly.data.ratio}x your average`;
+    default:
+      return 'Tap to check your status';
+  }
+}
+
 export async function registerBackgroundFetch(): Promise<void> {
   try {
     const status = await BackgroundTask.getStatusAsync();
@@ -91,7 +128,7 @@ export async function registerBackgroundFetch(): Promise<void> {
     if (isRegistered) return;
 
     await BackgroundTask.registerTaskAsync(BACKGROUND_TASK_NAME, {
-      minimumInterval: 30, // 30 minutes
+      minimumInterval: 15, // 15 minutes (more frequent for proactive intelligence)
     });
     console.log('[BackgroundTask] Registered successfully');
   } catch (e) {

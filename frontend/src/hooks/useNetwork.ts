@@ -10,6 +10,13 @@ export function useNetwork() {
   const drainQueue = useStore(s => s.drainQueue);
 
   useEffect(() => {
+    const intervalId = setInterval(() => {
+      const { isOnline } = useStore.getState();
+      if (isOnline) {
+        drainQueue().catch(() => {});
+      }
+    }, 60 * 1000);
+
     const unsub = NetInfo.addEventListener(state => {
       const online = !!(state.isConnected && state.isInternetReachable !== false);
       setOnline(online);
@@ -28,6 +35,9 @@ export function useNetwork() {
         }
       }
     });
-    return () => unsub();
+    return () => {
+      clearInterval(intervalId);
+      unsub();
+    };
   }, [setOnline, drainQueue]);
 }

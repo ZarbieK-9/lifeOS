@@ -1,0 +1,4 @@
+{"input":"log 500ml water","expected_intent":"simple_action","expected_use_heavy":false}
+{"input":"plan my day around meetings and tasks","expected_intent":"plan_day","expected_use_heavy":true}
+{"input":"what do I have tomorrow on calendar","expected_intent":"query_calendar","expected_use_heavy":false}
+{"input":"set a goal to sleep 8 hours nightly","expected_intent":"goal_creation","expected_use_heavy":true}
