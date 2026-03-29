@@ -11,6 +11,6 @@ npm run start
 
 ## CI
 
-On every push or PR to `main`, GitHub Actions runs `npm ci`, then **lint** and **Typecheck** (see `.github/workflows/ci.yml`). Lint/typecheck steps use `continue-on-error` until the codebase is clean; **`npm ci` must pass**.
+In the **LifeOS** repo (monorepo root), pushes/PRs to `main` that touch `frontend/` run **Frontend CI** (see `../.github/workflows/frontend-ci.yml`). If you split this folder into its own repo, add a copy of that workflow under `.github/workflows/` at the new root.
 
 Configure backend URL via `EXPO_PUBLIC_BACKEND_URL` or the in-app setting (see `src/services/api.ts`).

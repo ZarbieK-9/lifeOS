@@ -1,15 +1,25 @@
-name: CI
+name: Frontend CI
 
 on:
   push:
     branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: frontend-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: frontend
 
 jobs:
   check:
@@ -21,11 +31,11 @@ jobs:
         with:
           node-version: "20"
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install
         run: npm ci
 
-      # Strict once the tree is clean; today lint/tsc can fail without blocking the workflow.
       - name: Lint
         continue-on-error: true
         run: npm run lint
