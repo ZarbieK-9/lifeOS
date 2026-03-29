@@ -22,6 +22,9 @@ if [ -f "$OUT_DIR/lifeos_pb2_grpc.py" ]; then
   echo "Fixed imports in lifeos_pb2_grpc.py"
 fi
 
+# Copy descriptor next to backend envoy.yaml (PM2 / self-hosted uses cwd backend/)
+cp -f "$ENVOY_DIR/proto.pb" "$(cd "$(dirname "$0")" && pwd)/proto.pb"
+
 echo "Proto generation complete."
 echo "  Python stubs: $OUT_DIR/lifeos_pb2.py, $OUT_DIR/lifeos_pb2_grpc.py"
-echo "  Envoy descriptor: $ENVOY_DIR/proto.pb"
+echo "  Envoy descriptor: $ENVOY_DIR/proto.pb + backend/proto.pb"
